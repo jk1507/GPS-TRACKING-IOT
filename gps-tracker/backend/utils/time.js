@@ -33,3 +33,13 @@ export function toNumber(value, fallback = 0) {
   const n = Number(value);
   return Number.isFinite(n) ? n : fallback;
 }
+
+/**
+ * SQLite stores booleans as 0/1 and Postgres as true/false; normalise reads so
+ * every API response carries real booleans (null stays null).
+ */
+export function toBoolean(value) {
+  if (value === undefined || value === null) return null;
+  if (typeof value === 'boolean') return value;
+  return value === 1 || value === '1' || value === 'true';
+}

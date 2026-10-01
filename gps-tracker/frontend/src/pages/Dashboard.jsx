@@ -156,9 +156,23 @@ export default function Dashboard() {
     reloadHistory();
   };
 
-  const hasFix =
+  // (0,0) is "null island": the ESP32 reports it when there is no fix, so it
+  // must never be plotted as a real position.
+  const hasCoordinates =
+    latitude != null &&
+    longitude != null &&
     Number.isFinite(Number(latitude)) &&
     Number.isFinite(Number(longitude));
+
+  const isNullIsland =
+    Number(latitude) === 0 && Number(longitude) === 0;
+
+  // Explicit `gps_fix: false` from the device, or the tell-tale (0,0) pair.
+  const noGpsFix =
+    gpsFix === false || (hasCoordinates && isNullIsland);
+
+  const hasFix =
+    hasCoordinates && !isNullIsland && gpsFix !== false;
 
   const nearby =
     route?.points?.slice(-300) ?? [];
@@ -230,6 +244,35 @@ export default function Dashboard() {
         </div>
       ) : null}
 
+      {!error &&
+      !trackerLoading &&
+      status.hasData &&
+      noGpsFix ? (
+        <div className="mb-4 flex items-start gap-3 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800 dark:border-amber-900/60 dark:bg-amber-950/40 dark:text-amber-300">
+          <Icon
+            name="crosshair"
+            size={18}
+            className="mt-0.5 shrink-0 animate-pulse"
+          />
+
+          <div>
+            <p className="font-semibold">
+              No GPS fix
+            </p>
+
+            <p className="mt-0.5">
+              The tracker is reporting, but has not locked onto
+              satellites yet
+              {satellites != null
+                ? ` (${satellites} sats)`
+                : ''}
+              . Position data is unavailable until it acquires a
+              fix &mdash; move it outdoors or near a window.
+            </p>
+          </div>
+        </div>
+      ) : null}
+
       {/* ---------------------------------------------------------
           Main stat cards
       --------------------------------------------------------- */}
@@ -237,27 +280,31 @@ export default function Dashboard() {
       <div className="grid grid-cols-2 gap-3 sm:gap-4 lg:grid-cols-4">
         <StatCard
           label="Latitude"
-          value={formatCoord(latitude)}
+          value={hasFix ? formatCoord(latitude) : null}
           icon="navigation"
           tone="brand"
           loading={trackerLoading}
           hint={
             hasFix
               ? 'decimal degrees'
-              : undefined
+              : noGpsFix
+                ? 'no fix'
+                : undefined
           }
         />
 
         <StatCard
           label="Longitude"
-          value={formatCoord(longitude)}
+          value={hasFix ? formatCoord(longitude) : null}
           icon="navigation"
           tone="brand"
           loading={trackerLoading}
           hint={
             hasFix
               ? 'decimal degrees'
-              : undefined
+              : noGpsFix
+                ? 'no fix'
+                : undefined
           }
         />
 
@@ -268,11 +315,13 @@ export default function Dashboard() {
           icon="satellite"
           loading={trackerLoading}
           hint={
-            satellites != null
-              ? satellites >= 4
-                ? 'valid fix'
-                : 'weak fix'
-              : undefined
+            noGpsFix
+              ? 'no fix'
+              : satellites != null
+                ? satellites >= 4
+                  ? 'valid fix'
+                  : 'weak fix'
+                : undefined
           }
         />
 
@@ -499,6 +548,11 @@ export default function Dashboard() {
             online={status.online}
             follow
             loading={trackerLoading}
+            emptyMessage={
+              noGpsFix
+                ? 'No GPS fix yet'
+                : undefined
+            }
             className="h-[46vh] min-h-[320px]"
           />
         </div>

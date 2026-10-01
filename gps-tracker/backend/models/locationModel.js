@@ -1,5 +1,5 @@
 import { query, queryOne } from '../database/index.js';
-import { toNumber } from '../utils/time.js';
+import { toNumber, toBoolean } from '../utils/time.js';
 
 /*
  * All queries use `?` placeholders and are engine-agnostic (SQLite + Postgres).
@@ -7,14 +7,16 @@ import { toNumber } from '../utils/time.js';
  */
 
 const COLUMNS =
-  'id, device_id, latitude, longitude, altitude, satellites, accuracy, speed, heading, "timestamp", created_at';
+  'id, device_id, latitude, longitude, altitude, satellites, accuracy, speed, heading, ' +
+  'gps_fix, wifi_connected, wifi_rssi, geolinker_status, render_status, "timestamp", created_at';
 
 /** Insert one fix. Returns the new row. */
 export async function insertLocation(location) {
   const { rows } = await query(
     `INSERT INTO locations
-       (device_id, latitude, longitude, altitude, satellites, accuracy, speed, heading, "timestamp", created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       (device_id, latitude, longitude, altitude, satellites, accuracy, speed, heading,
+        gps_fix, wifi_connected, wifi_rssi, geolinker_status, render_status, "timestamp", created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
      RETURNING ${COLUMNS}`,
     [
       location.deviceId,
@@ -25,11 +27,26 @@ export async function insertLocation(location) {
       location.accuracy,
       location.speed,
       location.heading,
+      location.gpsFix,
+      location.wifiConnected,
+      location.wifiRssi,
+      location.geolinkerStatus,
+      location.renderStatus,
       location.timestamp,
       new Date().toISOString(),
     ],
   );
-  return rows[0];
+  return normalizeRow(rows[0]);
+}
+
+/** SQLite returns 0/1 for booleans; expose real booleans to the API. */
+function normalizeRow(row) {
+  if (!row) return row;
+  return {
+    ...row,
+    ...('gps_fix' in row ? { gps_fix: toBoolean(row.gps_fix) } : {}),
+    ...('wifi_connected' in row ? { wifi_connected: toBoolean(row.wifi_connected) } : {}),
+  };
 }
 
 export function getLatestLocation(deviceId) {
@@ -39,7 +56,7 @@ export function getLatestLocation(deviceId) {
       ORDER BY "timestamp" DESC, id DESC
       LIMIT 1`,
     [deviceId],
-  );
+  ).then(normalizeRow);
 }
 
 /** Build the shared WHERE clause for filtered reads. */
@@ -71,21 +88,21 @@ export async function listLocations({ deviceId, from, to, limit = 200, offset = 
       LIMIT ? OFFSET ?`,
     [...params, limit, offset],
   );
-  return rows;
+  return rows.map(normalizeRow);
 }
 
 /** Oldest-first points (what the Route polyline needs). */
 export async function listRoutePoints({ deviceId, from, to, limit = 5000 }) {
   const { where, params } = buildFilter({ deviceId, from, to });
   const { rows } = await query(
-    `SELECT latitude, longitude, altitude, satellites, "timestamp"
+    `SELECT latitude, longitude, altitude, satellites, gps_fix, "timestamp"
        FROM locations
        ${where}
        ORDER BY "timestamp" ASC, id ASC
        LIMIT ?`,
     [...params, limit],
   );
-  return rows;
+  return rows.map(normalizeRow);
 }
 
 export async function countLocations({ deviceId, from, to }) {

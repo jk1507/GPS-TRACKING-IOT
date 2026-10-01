@@ -75,6 +75,7 @@ export async function initDatabase() {
   else await connectSqlite();
 
   await runSchema();
+  await applySchemaUpgrades();
   return { dialect };
 }
 
@@ -91,6 +92,67 @@ export async function runSchema() {
   logger.info(`Schema applied (${dialect})`);
 }
 
+/*
+ * `CREATE TABLE IF NOT EXISTS` never alters an existing table, so telemetry
+ * columns added after a database was first created would otherwise be missing
+ * forever. These upgrades are idempotent and run on every boot.
+ */
+export async function applySchemaUpgrades() {
+  if (dialect === 'postgres') {
+    await query(`
+      ALTER TABLE locations
+        ADD COLUMN IF NOT EXISTS gps_fix BOOLEAN,
+        ADD COLUMN IF NOT EXISTS wifi_connected BOOLEAN,
+        ADD COLUMN IF NOT EXISTS wifi_rssi INTEGER,
+        ADD COLUMN IF NOT EXISTS geolinker_status TEXT,
+        ADD COLUMN IF NOT EXISTS render_status TEXT
+    `);
+
+    await query(`
+      ALTER TABLE devices
+        ADD COLUMN IF NOT EXISTS last_gps_fix BOOLEAN,
+        ADD COLUMN IF NOT EXISTS last_wifi_connected BOOLEAN,
+        ADD COLUMN IF NOT EXISTS last_wifi_rssi INTEGER,
+        ADD COLUMN IF NOT EXISTS last_geolinker_status TEXT,
+        ADD COLUMN IF NOT EXISTS last_render_status TEXT
+    `);
+    return;
+  }
+
+  // SQLite has no `ADD COLUMN IF NOT EXISTS`, so inspect the table first.
+  await addMissingColumns('locations', [
+    ['gps_fix', 'INTEGER'],
+    ['wifi_connected', 'INTEGER'],
+    ['wifi_rssi', 'INTEGER'],
+    ['geolinker_status', 'TEXT'],
+    ['render_status', 'TEXT'],
+  ]);
+
+  await addMissingColumns('devices', [
+    ['last_gps_fix', 'INTEGER'],
+    ['last_wifi_connected', 'INTEGER'],
+    ['last_wifi_rssi', 'INTEGER'],
+    ['last_geolinker_status', 'TEXT'],
+    ['last_render_status', 'TEXT'],
+  ]);
+}
+
+async function addMissingColumns(table, columns) {
+  const { rows } = await query(`PRAGMA table_info(${table})`);
+  const existing = new Set(rows.map((row) => row.name));
+
+  for (const [name, type] of columns) {
+    if (!existing.has(name)) {
+      await query(`ALTER TABLE ${table} ADD COLUMN ${name} ${type}`);
+    }
+  }
+}
+
+/* better-sqlite3 cannot bind booleans; Postgres needs real booleans. */
+function toSqliteParams(params) {
+  return params.map((value) => (typeof value === 'boolean' ? (value ? 1 : 0) : value));
+}
+
 /**
  * Run a parameterised statement.
  * @returns {Promise<{rows: object[], rowCount: number}>}
@@ -102,14 +164,15 @@ export async function query(sql, params = []) {
   }
 
   const statement = sqlite.prepare(sql);
+  const bound = toSqliteParams(params);
 
   // `.reader === true` means the statement returns rows (SELECT / RETURNING).
   if (statement.reader) {
-    const rows = statement.all(...params);
+    const rows = statement.all(...bound);
     return { rows, rowCount: rows.length };
   }
 
-  const info = statement.run(...params);
+  const info = statement.run(...bound);
   return { rows: [], rowCount: info.changes, lastInsertRowid: info.lastInsertRowid };
 }
 

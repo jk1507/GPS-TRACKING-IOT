@@ -1,7 +1,7 @@
 import { config } from '../config/index.js';
 import { logger } from '../utils/logger.js';
 import { pathDistanceMeters } from '../utils/geo.js';
-import { secondsBetween, toNumber } from '../utils/time.js';
+import { secondsBetween, toNumber, toBoolean } from '../utils/time.js';
 import * as devices from '../models/deviceModel.js';
 import * as locations from '../models/locationModel.js';
 import { broadcastLocation } from '../realtime/socket.js';
@@ -42,8 +42,8 @@ export async function getDeviceStatus(deviceId = config.deviceId) {
     altitude: device?.last_altitude ?? null,
     satellites: device?.last_satellites ?? null,
 
-    gps_fix: device?.last_gps_fix ?? null,
-    wifi_connected: device?.last_wifi_connected ?? null,
+    gps_fix: toBoolean(device?.last_gps_fix),
+    wifi_connected: toBoolean(device?.last_wifi_connected),
     wifi_rssi: device?.last_wifi_rssi ?? null,
 
     geolinker_status: device?.last_geolinker_status ?? null,
