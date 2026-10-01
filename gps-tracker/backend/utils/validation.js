@@ -196,12 +196,18 @@ export function validateLocationPayload(body = {}) {
   }
 
   // (0,0) is in the Gulf of Guinea - the classic "GPS has no fix" value.
-  if (config.rejectNullIsland && latitude === 0 && longitude === 0) {
-    throw new ApiError(
-      422,
-      'Rejected (0,0) coordinates - device most likely has no GPS fix',
-    );
-  }
+// Reject (0,0) only when the device claims to have a valid GPS fix.
+if (
+  config.rejectNullIsland &&
+  latitude === 0 &&
+  longitude === 0 &&
+  gpsFix !== false
+) {
+  throw new ApiError(
+    422,
+    'Rejected (0,0) coordinates - device most likely has no GPS fix',
+  );
+}
 
   // ---------------------------------------------------------
   // Clean payload
