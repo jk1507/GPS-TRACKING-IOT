@@ -4,31 +4,45 @@
 -- ==========================================================
 
 CREATE TABLE IF NOT EXISTS devices (
-  device_id       TEXT PRIMARY KEY,
-  name            TEXT        NOT NULL DEFAULT 'GPS TRACKING',
-  last_seen_at    TIMESTAMPTZ,
-  last_latitude   DOUBLE PRECISION,
-  last_longitude  DOUBLE PRECISION,
-  last_altitude   DOUBLE PRECISION,
-  last_satellites INTEGER,
-  ip_address      TEXT,
-  firmware        TEXT,
-  created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
-  updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+  device_id              TEXT PRIMARY KEY,
+  name                   TEXT        NOT NULL DEFAULT 'GPS TRACKING',
+  last_seen_at           TIMESTAMPTZ,
+  last_latitude          DOUBLE PRECISION,
+  last_longitude         DOUBLE PRECISION,
+  last_altitude          DOUBLE PRECISION,
+  last_satellites        INTEGER,
+
+  last_gps_fix           BOOLEAN,
+  last_wifi_connected    BOOLEAN,
+  last_wifi_rssi         INTEGER,
+  last_geolinker_status  TEXT,
+  last_render_status     TEXT,
+
+  ip_address             TEXT,
+  firmware               TEXT,
+  created_at             TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at             TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
 CREATE TABLE IF NOT EXISTS locations (
-  id          BIGSERIAL PRIMARY KEY,
-  device_id   TEXT             NOT NULL,
-  latitude    DOUBLE PRECISION NOT NULL,
-  longitude   DOUBLE PRECISION NOT NULL,
-  altitude    DOUBLE PRECISION,
-  satellites  INTEGER,
-  accuracy    DOUBLE PRECISION,
-  speed       DOUBLE PRECISION,
-  heading     DOUBLE PRECISION,
-  "timestamp" TIMESTAMPTZ      NOT NULL,
-  created_at  TIMESTAMPTZ      NOT NULL DEFAULT now()
+  id                BIGSERIAL PRIMARY KEY,
+  device_id         TEXT             NOT NULL,
+  latitude          DOUBLE PRECISION NOT NULL,
+  longitude         DOUBLE PRECISION NOT NULL,
+  altitude          DOUBLE PRECISION,
+  satellites        INTEGER,
+  accuracy          DOUBLE PRECISION,
+  speed             DOUBLE PRECISION,
+  heading            DOUBLE PRECISION,
+
+  gps_fix           BOOLEAN,
+  wifi_connected    BOOLEAN,
+  wifi_rssi         INTEGER,
+  geolinker_status  TEXT,
+  render_status     TEXT,
+
+  "timestamp"       TIMESTAMPTZ      NOT NULL,
+  created_at        TIMESTAMPTZ      NOT NULL DEFAULT now()
 );
 
 CREATE INDEX IF NOT EXISTS idx_locations_device_timestamp

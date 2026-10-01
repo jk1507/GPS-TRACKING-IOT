@@ -14,28 +14,49 @@ import { broadcastLocation } from '../realtime/socket.js';
  */
 export async function getDeviceStatus(deviceId = config.deviceId) {
   const device = await devices.getDevice(deviceId);
-  const firstAt = device?.device_id ? await devices.getFirstLocationAt(deviceId) : null;
-  const locationCount = device?.device_id ? await locations.countLocations({ deviceId }) : 0;
+  const firstAt = device?.device_id
+    ? await devices.getFirstLocationAt(deviceId)
+    : null;
+
+  const locationCount = device?.device_id
+    ? await locations.countLocations({ deviceId })
+    : 0;
 
   const lastSeenAt = device?.last_seen_at ?? null;
   const ageSeconds = lastSeenAt ? secondsBetween(lastSeenAt) : null;
-  const online = ageSeconds !== null && ageSeconds <= config.offlineTimeoutSeconds;
+  const online =
+    ageSeconds !== null &&
+    ageSeconds <= config.offlineTimeoutSeconds;
 
   return {
     device_id: deviceId,
     name: device?.name ?? config.deviceName,
+
     online,
     last_seen_at: lastSeenAt,
     age_seconds: ageSeconds,
     offline_timeout_seconds: config.offlineTimeoutSeconds,
+
     latitude: device?.last_latitude ?? null,
     longitude: device?.last_longitude ?? null,
     altitude: device?.last_altitude ?? null,
     satellites: device?.last_satellites ?? null,
+
+    gps_fix: device?.last_gps_fix ?? null,
+    wifi_connected: device?.last_wifi_connected ?? null,
+    wifi_rssi: device?.last_wifi_rssi ?? null,
+
+    geolinker_status: device?.last_geolinker_status ?? null,
+    render_status: device?.last_render_status ?? null,
+
     ip_address: device?.ip_address ?? null,
+
     location_count: locationCount,
     first_location_at: firstAt,
-    tracking_duration_seconds: firstAt ? secondsBetween(firstAt) : 0,
+    tracking_duration_seconds: firstAt
+      ? secondsBetween(firstAt)
+      : 0,
+
     server_time: new Date().toISOString(),
   };
 }
@@ -45,51 +66,110 @@ export async function getDeviceStatus(deviceId = config.deviceId) {
  * WebSocket. Called by POST /api/location.
  */
 export async function ingestLocation(payload, { ipAddress } = {}) {
-  await devices.ensureDevice(payload.deviceId, config.deviceName);
+  await devices.ensureDevice(
+    payload.deviceId,
+    config.deviceName,
+  );
 
+  // Store the complete location + telemetry record.
   const location = await locations.insertLocation(payload);
 
+  // Update the latest device snapshot.
   await devices.touchDevice(payload.deviceId, {
     latitude: payload.latitude,
     longitude: payload.longitude,
     altitude: payload.altitude,
     satellites: payload.satellites,
+
+    gpsFix: payload.gpsFix,
+    wifiConnected: payload.wifiConnected,
+    wifiRssi: payload.wifiRssi,
+
+    geolinkerStatus: payload.geolinkerStatus,
+    renderStatus: payload.renderStatus,
+
     ipAddress,
   });
 
+  // Build the current device state.
   const device = await getDeviceStatus(payload.deviceId);
 
+  // Send the complete update to connected dashboard clients.
   broadcastLocation(location, device);
 
   logger.info(
-    `Fix stored for ${payload.deviceId}: ${payload.latitude.toFixed(6)}, ${payload.longitude.toFixed(6)} ` +
+    `Fix stored for ${payload.deviceId}: ` +
+      `${payload.latitude.toFixed(6)}, ` +
+      `${payload.longitude.toFixed(6)} ` +
       `(${payload.satellites} sats)`,
   );
 
-  return { location, device };
+  return {
+    location,
+    device,
+  };
 }
 
 /** Paginated, range-filtered history for the History page. */
-export async function getHistory({ deviceId, from, to, limit, offset }) {
+export async function getHistory({
+  deviceId,
+  from,
+  to,
+  limit,
+  offset,
+}) {
   const [rows, total] = await Promise.all([
-    locations.listLocations({ deviceId, from, to, limit, offset }),
-    locations.countLocations({ deviceId, from, to }),
+    locations.listLocations({
+      deviceId,
+      from,
+      to,
+      limit,
+      offset,
+    }),
+
+    locations.countLocations({
+      deviceId,
+      from,
+      to,
+    }),
   ]);
-  return { locations: rows, total };
+
+  return {
+    locations: rows,
+    total,
+  };
 }
 
 /** Ordered track + derived distance/duration for the Route page. */
-export async function getRoute({ deviceId, from, to, limit }) {
-  const points = await locations.listRoutePoints({ deviceId, from, to, limit });
+export async function getRoute({
+  deviceId,
+  from,
+  to,
+  limit,
+}) {
+  const points = await locations.listRoutePoints({
+    deviceId,
+    from,
+    to,
+    limit,
+  });
+
   const distanceMeters = pathDistanceMeters(points);
-  const first = points[0]?.timestamp ?? null;
-  const last = points[points.length - 1]?.timestamp ?? null;
+
+  const first =
+    points[0]?.timestamp ?? null;
+
+  const last =
+    points[points.length - 1]?.timestamp ?? null;
 
   return {
     points,
     count: points.length,
     distance_meters: Math.round(distanceMeters),
-    duration_seconds: first && last ? secondsBetween(first, last) : 0,
+    duration_seconds:
+      first && last
+        ? secondsBetween(first, last)
+        : 0,
     first_at: first,
     last_at: last,
     truncated: points.length >= limit,
@@ -97,23 +177,49 @@ export async function getRoute({ deviceId, from, to, limit }) {
 }
 
 /** Everything the dashboard cards need, in one round trip. */
-export async function getDashboardStats({ deviceId = config.deviceId, from, to } = {}) {
-  const stats = await locations.getLocationStats({ deviceId, from, to });
-  const device = await getDeviceStatus(deviceId);
+export async function getDashboardStats({
+  deviceId = config.deviceId,
+  from,
+  to,
+} = {}) {
+  const stats =
+    await locations.getLocationStats({
+      deviceId,
+      from,
+      to,
+    });
+
+  const device =
+    await getDeviceStatus(deviceId);
 
   const today = new Date();
   today.setHours(0, 0, 0, 0);
 
-  const todayStats = await locations.getLocationStats({ deviceId, from: today.toISOString() });
+  const todayStats =
+    await locations.getLocationStats({
+      deviceId,
+      from: today.toISOString(),
+    });
 
   return {
     device,
-    range: { from: from ?? null, to: to ?? null },
+
+    range: {
+      from: from ?? null,
+      to: to ?? null,
+    },
+
     locations_recorded: stats.total,
     locations_today: todayStats.total,
+
     first_location_at: stats.firstAt,
-    last_location_at: stats.lastAt ?? device.last_seen_at,
-    tracking_duration_seconds: device.tracking_duration_seconds,
-    total_locations_all_time: toNumber(device.location_count),
+    last_location_at:
+      stats.lastAt ?? device.last_seen_at,
+
+    tracking_duration_seconds:
+      device.tracking_duration_seconds,
+
+    total_locations_all_time:
+      toNumber(device.location_count),
   };
 }
