@@ -1,0 +1,32 @@
+# dependencies
+node_modules/
+.pnpm-store/
+
+# environment / secrets  (NEVER commit these)
+.env
+.env.local
+.env.*.local
+esp32/secrets.h
+
+# databases
+*.db
+*.db-journal
+*.sqlite
+*.sqlite3
+backend/data/*.db
+
+# build output
+dist/
+build/
+.vite/
+
+# logs
+*.log
+npm-debug.log*
+logs/
+
+# editors / os
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
