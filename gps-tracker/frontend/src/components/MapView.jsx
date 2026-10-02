@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { Fragment, useEffect, useMemo, useRef, useState } from 'react';
 import {
   MapContainer,
   TileLayer,
@@ -13,24 +13,82 @@ import L from 'leaflet';
 
 import Icon from './Icon.jsx';
 import { useTheme } from '../context/ThemeContext.jsx';
-import { formatCoord, formatDateTime, formatDistance } from '../utils/format.js';
+import {
+  formatCoord,
+  formatDateTime,
+  formatDistance,
+  formatDuration,
+} from '../utils/format.js';
+import { analyzeTrack, pathDistanceMeters } from '../utils/track.js';
 
-/* OpenStreetMap + Esri satellite only - no Google Maps anywhere. */
+/*
+ * Detailed base maps - OSM + Esri only, no Google Maps anywhere.
+ *   map      standard street map with road/place labels
+ *   terrain  Esri topographic map: contours, trails, elevation shading
+ *   satellite Esri imagery
+ *   hybrid   Esri imagery with a labels overlay on top
+ */
 const TILES = {
   map: {
+    label: 'Map',
+    icon: 'map',
     url: 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',
-    attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
+    attribution:
+      '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
     maxZoom: 19,
+    invertInDark: true,
+  },
+  terrain: {
+    label: 'Terrain',
+    icon: 'altitude',
+    url: 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Topo_Map/MapServer/tile/{z}/{y}/{x}',
+    attribution:
+      'Tiles &copy; <a href="https://www.esri.com/">Esri</a> &mdash; Esri, USGS, NAVTEQ, Intermap, NRCAN, Esri Japan, Esri China',
+    maxZoom: 19,
+    invertInDark: true,
   },
   satellite: {
+    label: 'Satellite',
+    icon: 'satellite',
     url: 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
     attribution: 'Tiles &copy; Esri, Maxar, Earthstar Geographics',
     maxZoom: 19,
+    invertInDark: false,
+  },
+  hybrid: {
+    label: 'Hybrid',
+    icon: 'layers',
+    url: 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
+    overlay:
+      'https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}',
+    attribution:
+      'Imagery &copy; Esri, Maxar, Earthstar Geographics &middot; Labels &copy; Esri',
+    maxZoom: 19,
+    invertInDark: false,
   },
 };
 
 const DEFAULT_CENTER = [20.5937, 78.9629]; // neutral fallback, never a fake fix
 const DEFAULT_ZOOM = 4;
+
+// The dotted "flow" line: a soft casing underneath keeps the dots readable
+// on top of both street maps and satellite imagery.
+const CASING_STYLE = {
+  color: '#0f172a',
+  weight: 8,
+  opacity: 0.16,
+  lineCap: 'round',
+  lineJoin: 'round',
+};
+
+const FLOW_STYLE = {
+  color: '#22d3ee',
+  weight: 4,
+  opacity: 0.95,
+  dashArray: '0.5, 11', // round dots = the travelled flow
+  lineCap: 'round',
+  lineJoin: 'round',
+};
 
 function createDeviceIcon(online) {
   const color = online ? '#10b981' : '#ef4444';
@@ -46,9 +104,20 @@ function createDeviceIcon(online) {
 function createEndpointIcon(color) {
   return L.divIcon({
     className: 'device-marker',
-    html: `<span style="display:block;width:10px;height:10px;border-radius:9999px;background:${color};box-shadow:0 0 0 2px #fff"></span>`,
-    iconSize: [10, 10],
-    iconAnchor: [5, 5],
+    html: `<span style="display:block;width:12px;height:12px;border-radius:9999px;background:${color};box-shadow:0 0 0 3px #fff,0 2px 6px rgb(0 0 0 / 0.35)"></span>`,
+    iconSize: [12, 12],
+    iconAnchor: [6, 6],
+    popupAnchor: [0, -10],
+  });
+}
+
+function createStopIcon() {
+  return L.divIcon({
+    className: 'device-marker',
+    html: '<span class="stop-pin"></span>',
+    iconSize: [14, 14],
+    iconAnchor: [7, 7],
+    popupAnchor: [0, -10],
   });
 }
 
@@ -61,9 +130,14 @@ function MapBridge({ mapRef, onReady }) {
   return null;
 }
 
+const toLatLngs = (points) =>
+  points.map((p) => [Number(p.latitude), Number(p.longitude)]);
+
 /**
  * @param marker   latest fix: { latitude, longitude, altitude, satellites, accuracy, timestamp }
- * @param path     array of { latitude, longitude } for the route polyline
+ * @param path     array of { latitude, longitude, timestamp?, speed? } for the route.
+ *                 When timestamps are present the trail is split into legs
+ *                 between detected stops and every stop is pinned.
  * @param online   device online state (drives marker colour)
  * @param follow   pan the map to the marker as it moves (default true)
  * @param autoFit  fit the map to `path` whenever the route changes
@@ -87,17 +161,30 @@ export default function MapView({
   const [layer, setLayer] = useState('map');
   const [ready, setReady] = useState(false);
 
-  const positions = useMemo(
+  const points = useMemo(
     () =>
-      (path || [])
-        .filter((p) => Number.isFinite(p?.latitude) && Number.isFinite(p?.longitude))
-        .map((p) => [p.latitude, p.longitude]),
+      (path || []).filter(
+        (p) => Number.isFinite(Number(p?.latitude)) && Number.isFinite(Number(p?.longitude)),
+      ),
     [path],
   );
 
+  const positions = useMemo(
+    () => points.map((p) => [Number(p.latitude), Number(p.longitude)]),
+    [points],
+  );
+
+  // Dotted legs + detected stops (start -> stop -> start -> ...).
+  const track = useMemo(() => analyzeTrack(points), [points]);
+  const segments = useMemo(
+    () => track.segments.map(toLatLngs),
+    [track],
+  );
+  const stops = track.stops;
+
   const markerPosition = useMemo(
     () =>
-      marker && Number.isFinite(marker.latitude) && Number.isFinite(marker.longitude)
+      marker && Number.isFinite(Number(marker.latitude)) && Number.isFinite(Number(marker.longitude))
         ? [marker.latitude, marker.longitude]
         : null,
     [marker],
@@ -106,6 +193,7 @@ export default function MapView({
   const icon = useMemo(() => createDeviceIcon(online), [online]);
   const startIcon = useMemo(() => createEndpointIcon('#10b981'), []);
   const endIcon = useMemo(() => createEndpointIcon('#06b6d4'), []);
+  const stopIcon = useMemo(() => createStopIcon(), []);
 
   const centerOnDevice = () => {
     const map = mapRef.current;
@@ -139,7 +227,9 @@ export default function MapView({
     map.fitBounds(positions, { padding: [40, 40] });
   }, [positions, autoFit]);
 
-  const tiles = TILES[layer];
+  const tiles = TILES[layer] ?? TILES.map;
+  const trailLength = pathDistanceMeters(points);
+  const endPoint = positions.length ? positions[positions.length - 1] : null;
 
   return (
     <div className={`relative overflow-hidden rounded-2xl border border-slate-200 dark:border-slate-800 ${className}`}>
@@ -147,20 +237,73 @@ export default function MapView({
         center={markerPosition ?? DEFAULT_CENTER}
         zoom={markerPosition ? zoom : DEFAULT_ZOOM}
         scrollWheelZoom
-        className={`h-full w-full ${isDark && layer === 'map' ? 'map-dark' : ''}`}
+        className={`h-full w-full ${isDark && tiles.invertInDark ? 'map-dark' : ''}`}
         worldCopyJump
       >
         <MapBridge mapRef={mapRef} onReady={() => setReady(true)} />
         <TileLayer key={layer} url={tiles.url} attribution={tiles.attribution} maxZoom={tiles.maxZoom} />
+        {tiles.overlay ? (
+          <TileLayer
+            key={`${layer}-overlay`}
+            url={tiles.overlay}
+            maxZoom={tiles.maxZoom}
+            opacity={0.95}
+          />
+        ) : null}
         <ScaleControl position="bottomleft" imperial={false} />
 
+        {/* Dotted travel flow: one leg per start -> stop stretch */}
+        {segments.map((segment, index) => (
+          // eslint-disable-next-line react/no-array-index-key
+          <Fragment key={`leg-${index}`}>
+            <Polyline positions={segment} pathOptions={CASING_STYLE} />
+            <Polyline positions={segment} pathOptions={FLOW_STYLE} />
+          </Fragment>
+        ))}
+
+        {/* Journey endpoints */}
         {positions.length > 1 ? (
-          <>
-            <Polyline positions={positions} pathOptions={{ color: '#06b6d4', weight: 3, opacity: 0.9 }} />
-            <Marker position={positions[0]} icon={startIcon} />
-            <Marker position={positions[positions.length - 1]} icon={endIcon} />
-          </>
+          <Marker position={positions[0]} icon={startIcon}>
+            <Popup>
+              <div className="space-y-0.5">
+                <p className="font-semibold text-slate-900 dark:text-white">Start of route</p>
+                <p className="text-slate-500">{formatDateTime(points[0]?.timestamp)}</p>
+              </div>
+            </Popup>
+          </Marker>
         ) : null}
+
+        {!markerPosition && endPoint && positions.length > 1 ? (
+          <Marker position={endPoint} icon={endIcon}>
+            <Popup>
+              <div className="space-y-0.5">
+                <p className="font-semibold text-slate-900 dark:text-white">End of route</p>
+                <p className="text-slate-500">{formatDateTime(points[points.length - 1]?.timestamp)}</p>
+              </div>
+            </Popup>
+          </Marker>
+        ) : null}
+
+        {/* Stops: where the device came to a halt */}
+        {stops.map((stop, index) => (
+          <Marker
+            key={`${stop.arrivedAt}-${stop.latitude}`}
+            position={[stop.latitude, stop.longitude]}
+            icon={stopIcon}
+          >
+            <Popup>
+              <div className="space-y-0.5">
+                <p className="font-semibold text-slate-900 dark:text-white">
+                  Stop {index + 1}
+                  {stops.length ? ` of ${stops.length}` : ''}
+                </p>
+                <p>Arrived: {formatDateTime(stop.arrivedAt)}</p>
+                <p>Left: {formatDateTime(stop.leftAt)}</p>
+                <p>Stayed: {formatDuration(stop.durationSeconds)}</p>
+              </div>
+            </Popup>
+          </Marker>
+        ))}
 
         {markerPosition ? (
           <>
@@ -196,12 +339,12 @@ export default function MapView({
 
       {/* Controls */}
       <div className="pointer-events-none absolute inset-x-0 top-0 z-[400] flex items-start justify-between gap-2 p-3">
-        <div className="pointer-events-auto flex flex-col gap-2">
+        <div className="pointer-events-none flex flex-col gap-2">
           <button
             type="button"
             onClick={centerOnDevice}
             disabled={!markerPosition}
-            className="btn btn-sm btn-outline bg-white/90 backdrop-blur disabled:opacity-40 dark:bg-slate-900/90"
+            className="btn btn-sm btn-outline pointer-events-auto bg-white/90 backdrop-blur disabled:opacity-40 dark:bg-slate-900/90"
             title="Center on device"
           >
             <Icon name="crosshair" size={14} />
@@ -212,38 +355,57 @@ export default function MapView({
             <button
               type="button"
               onClick={fitRoute}
-              className="btn btn-sm btn-outline bg-white/90 backdrop-blur dark:bg-slate-900/90"
+              className="btn btn-sm btn-outline pointer-events-auto bg-white/90 backdrop-blur dark:bg-slate-900/90"
               title="Fit route"
             >
               <Icon name="route" size={14} />
               <span className="hidden sm:inline">Fit Route</span>
             </button>
           ) : null}
+
+          {/* Legend */}
+          {positions.length > 1 ? (
+            <div className="pointer-events-auto w-max rounded-xl border border-slate-200 bg-white/90 p-2 text-[11px] text-slate-600 backdrop-blur dark:border-slate-700 dark:bg-slate-900/90 dark:text-slate-300">
+              <p className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-slate-400 dark:text-slate-500">
+                Travel flow
+              </p>
+              <ul className="space-y-1">
+                <li className="flex items-center gap-2">
+                  <span className="legend-dots" />
+                  Travelled route
+                </li>
+                <li className="flex items-center gap-2">
+                  <span className="legend-dot" style={{ background: '#10b981' }} />
+                  Start
+                </li>
+                <li className="flex items-center gap-2">
+                  <span className="legend-dot" style={{ background: '#f59e0b' }} />
+                  Stop {stops.length ? `(${stops.length})` : ''}
+                </li>
+                <li className="flex items-center gap-2">
+                  <span className="legend-dot" style={{ background: '#06b6d4' }} />
+                  {markerPosition ? 'Current position' : 'End'}
+                </li>
+              </ul>
+            </div>
+          ) : null}
         </div>
 
         <div className="pointer-events-auto flex gap-1 rounded-xl border border-slate-200 bg-white/90 p-1 backdrop-blur dark:border-slate-700 dark:bg-slate-900/90">
-          <button
-            type="button"
-            onClick={() => setLayer('map')}
-            className={`rounded-lg px-2.5 py-1.5 text-xs font-medium transition-colors ${
-              layer === 'map' ? 'bg-brand-600 text-white' : 'text-slate-600 dark:text-slate-300'
-            }`}
-            title="Street map"
-          >
-            <Icon name="map" size={14} className="sm:mr-1 inline" />
-            <span className="hidden sm:inline">Map</span>
-          </button>
-          <button
-            type="button"
-            onClick={() => setLayer('satellite')}
-            className={`rounded-lg px-2.5 py-1.5 text-xs font-medium transition-colors ${
-              layer === 'satellite' ? 'bg-brand-600 text-white' : 'text-slate-600 dark:text-slate-300'
-            }`}
-            title="Satellite imagery"
-          >
-            <Icon name="satellite" size={14} className="sm:mr-1 inline" />
-            <span className="hidden sm:inline">Satellite</span>
-          </button>
+          {Object.entries(TILES).map(([key, value]) => (
+            <button
+              key={key}
+              type="button"
+              onClick={() => setLayer(key)}
+              className={`rounded-lg px-2.5 py-1.5 text-xs font-medium transition-colors ${
+                layer === key ? 'bg-brand-600 text-white' : 'text-slate-600 dark:text-slate-300'
+              }`}
+              title={`${value.label} layer`}
+            >
+              <Icon name={value.icon} size={14} className="sm:mr-1 inline" />
+              <span className="hidden sm:inline">{value.label}</span>
+            </button>
+          ))}
         </div>
       </div>
 
@@ -268,30 +430,19 @@ export default function MapView({
 
       {/* Route summary chip */}
       {positions.length > 1 ? (
-        <div className="pointer-events-none absolute bottom-3 right-3 z-[400]">
+        <div className="pointer-events-none absolute bottom-3 right-3 z-[400] flex flex-col items-end gap-1">
           <span className="chip bg-white/90 text-slate-600 backdrop-blur dark:bg-slate-900/90 dark:text-slate-300">
             <Icon name="route" size={13} />
-            {positions.length} points &middot; {formatDistance(routeDistance(positions))}
+            {positions.length} points &middot; {formatDistance(trailLength)}
           </span>
+          {stops.length > 0 ? (
+            <span className="chip bg-white/90 text-slate-600 backdrop-blur dark:bg-slate-900/90 dark:text-slate-300">
+              <Icon name="clock" size={13} />
+              {stops.length} stop{stops.length === 1 ? '' : 's'}
+            </span>
+          ) : null}
         </div>
       ) : null}
     </div>
   );
-}
-
-/** Rough polyline length for the summary chip (metres). */
-function routeDistance(positions) {
-  let total = 0;
-  for (let i = 1; i < positions.length; i += 1) {
-    const [lat1, lon1] = positions[i - 1];
-    const [lat2, lon2] = positions[i];
-    const R = 6371008.8;
-    const dLat = ((lat2 - lat1) * Math.PI) / 180;
-    const dLon = ((lon2 - lon1) * Math.PI) / 180;
-    const a =
-      Math.sin(dLat / 2) ** 2 +
-      Math.cos((lat1 * Math.PI) / 180) * Math.cos((lat2 * Math.PI) / 180) * Math.sin(dLon / 2) ** 2;
-    total += 2 * R * Math.asin(Math.min(1, Math.sqrt(a)));
-  }
-  return total;
 }

@@ -27,6 +27,7 @@ import {
 } from '../utils/format.js';
 
 import { defaultRange, rangeToQuery } from '../utils/range.js';
+import { appendLivePoint } from '../utils/track.js';
 import { useState } from 'react';
 
 export default function Dashboard() {
@@ -176,6 +177,18 @@ export default function Dashboard() {
 
   const nearby =
     route?.points?.slice(-300) ?? [];
+
+  const markerPoint = hasFix
+    ? {
+        ...latest,
+        latitude,
+        longitude,
+        timestamp: latest?.timestamp ?? device?.last_seen_at ?? null,
+      }
+    : null;
+
+  // Grow the dotted trail with each fix that arrives over the socket.
+  const nearbyPath = appendLivePoint(nearby, markerPoint);
 
   return (
     <div>
@@ -535,16 +548,8 @@ export default function Dashboard() {
           </div>
 
           <MapView
-            marker={
-              hasFix
-                ? {
-                    ...latest,
-                    latitude,
-                    longitude,
-                  }
-                : null
-            }
-            path={nearby}
+            marker={markerPoint}
+            path={nearbyPath}
             online={status.online}
             follow
             loading={trackerLoading}

@@ -184,6 +184,8 @@ export default function History() {
     .map((r) => ({
       latitude: r.latitude,
       longitude: r.longitude,
+      timestamp: r.timestamp,
+      speed: r.speed,
     }));
 
   const rangeLabel =

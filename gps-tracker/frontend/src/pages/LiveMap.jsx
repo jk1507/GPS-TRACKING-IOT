@@ -9,6 +9,7 @@ import { InfoRow } from '../components/ui.jsx';
 import { DeviceStatusPill, ConnectionPill } from '../components/StatusPill.jsx';
 import { formatCoord, formatDateTime, formatRelative, formatDistance } from '../utils/format.js';
 import { rangeToQuery } from '../utils/range.js';
+import { appendLivePoint } from '../utils/track.js';
 
 export default function LiveMap() {
   const { latest, device, status, loading } = useTracker();
@@ -53,7 +54,7 @@ export default function LiveMap() {
       <div className="grid gap-5 lg:grid-cols-[1fr_320px]">
         <MapView
           marker={marker}
-          path={(route?.points ?? []).slice(-500)}
+          path={appendLivePoint((route?.points ?? []).slice(-500), marker)}
           online={status.online}
           follow
           loading={loading}

@@ -91,11 +91,15 @@ export async function listLocations({ deviceId, from, to, limit = 200, offset = 
   return rows.map(normalizeRow);
 }
 
-/** Oldest-first points (what the Route polyline needs). */
+/**
+ * Oldest-first points (what the Route polyline needs).
+ * speed + heading are included so the frontend can split the trail into
+ * travel segments and detect where the device came to a stop.
+ */
 export async function listRoutePoints({ deviceId, from, to, limit = 5000 }) {
   const { where, params } = buildFilter({ deviceId, from, to });
   const { rows } = await query(
-    `SELECT latitude, longitude, altitude, satellites, gps_fix, "timestamp"
+    `SELECT latitude, longitude, altitude, satellites, accuracy, speed, heading, gps_fix, "timestamp"
        FROM locations
        ${where}
        ORDER BY "timestamp" ASC, id ASC

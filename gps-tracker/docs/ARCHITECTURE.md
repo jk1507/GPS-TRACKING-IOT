@@ -106,13 +106,17 @@ One direction for writes (device -> DB -> socket), one for reads (browser -> RES
 - **`hooks/useNow.js`** — Ticking clock so offline status re-evaluates.
 - **`utils/format.js`** — Date/duration/distance/coord formatters.
 - **`utils/range.js`** — Range presets + converting a UI range into an API query.
+- **`utils/track.js`** — Travel analysis: haversine distance, stop detection (splits the
+  track into legs between stops) and appending live socket fixes to the drawn trail.
 
 ## Frontend — components
 
 - **`components/Layout.jsx`** — Sidebar/nav/header shell, wraps pages via `<Outlet>`; theme
   toggle + refresh + status pills.
-- **`components/MapView.jsx`** — Leaflet map (OSM/Esri only): marker, polyline, accuracy
-  circle, follow/fit controls. Used by Dashboard, LiveMap, History, Route, Device.
+- **`components/MapView.jsx`** — Leaflet map (OSM/Esri only): dotted travel-flow trail
+  split into legs between detected stops, start/stop/current pins with popups, accuracy
+  circle, follow/fit controls, legend, and four detail layers (street, terrain, satellite,
+  hybrid). Used by Dashboard, LiveMap, History, Route, Device.
 - **`components/StatusPill.jsx`** — ONLINE/OFFLINE badge and realtime-connection pill.
 - **`components/RangeFilter.jsx`** — Preset/custom date-range picker.
 - **`components/ui.jsx`** — Shared primitives (`StatCard`, `PageHeader`, `InfoRow`,

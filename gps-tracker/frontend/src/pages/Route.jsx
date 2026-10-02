@@ -19,7 +19,8 @@ export default function RoutePlanner() {
   );
 
   const points = data?.points ?? [];
-  const path = points.map((p) => ({ latitude: p.latitude, longitude: p.longitude }));
+  // Keep timestamp + speed so MapView can split the trail at stops.
+  const path = points;
 
   const showToday = () => {
     setRange({ preset: 'today', from: '', to: '' });
