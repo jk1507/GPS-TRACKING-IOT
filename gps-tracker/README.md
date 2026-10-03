@@ -346,6 +346,7 @@ the `locations` table, which are only written by `POST /api/location`.
 | GET    | `/api/locations`        | Dashboard key | History (`range`/`from`/`to`, `limit`, `offset`) |
 | GET    | `/api/locations/latest` | Dashboard key | Most recent fix + device status           |
 | GET    | `/api/route`            | Dashboard key | Polyline points + distance/duration       |
+| GET    | `/api/export`           | Dashboard key | Full-range CSV download (every fix)       |
 | GET    | `/api/device`           | Dashboard key | Online/offline status for one device      |
 | GET    | `/api/devices`          | Dashboard key | All known devices                         |
 | GET    | `/api/stats`            | Dashboard key | Dashboard aggregates                      |

@@ -70,6 +70,14 @@ export function formatDistance(meters) {
   return `${(value / 1000).toFixed(value < 10000 ? 2 : 1)} km`;
 }
 
+/** Speed is stored in m/s; display it the way people read it. */
+export function formatSpeed(mps) {
+  const value = Number(mps);
+  if (!Number.isFinite(value)) return DASH;
+  const kmh = value * 3.6;
+  return `${kmh.toFixed(kmh < 100 ? 1 : 0)} km/h`;
+}
+
 export function formatCoord(value, digits = 6) {
   const n = Number(value);
   if (!Number.isFinite(n)) return DASH;

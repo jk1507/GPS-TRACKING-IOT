@@ -19,7 +19,7 @@ import {
   formatDistance,
   formatDuration,
 } from '../utils/format.js';
-import { analyzeTrack, pathDistanceMeters } from '../utils/track.js';
+import { analyzeTrack, haversineMeters, pathDistanceMeters } from '../utils/track.js';
 
 /*
  * Detailed base maps - OSM + Esri only, no Google Maps anywhere.
@@ -70,6 +70,10 @@ const TILES = {
 
 const DEFAULT_CENTER = [20.5937, 78.9629]; // neutral fallback, never a fake fix
 const DEFAULT_ZOOM = 4;
+
+// Re-center only after the device really moved this far since the last pan.
+// Keeps the map still while parked (GPS jitter is typically 5-15 m).
+const FOLLOW_MIN_METERS = 25;
 
 // The dotted "flow" line: a soft casing underneath keeps the dots readable
 // on top of both street maps and satellite imagery.
@@ -157,6 +161,7 @@ export default function MapView({
   const { isDark } = useTheme();
   const mapRef = useRef(null);
   const lastFocusKey = useRef(null);
+  const lastFollowPoint = useRef(null);
   const lastFitKey = useRef(null);
   const [layer, setLayer] = useState('map');
   const [ready, setReady] = useState(false);
@@ -208,12 +213,26 @@ export default function MapView({
   };
 
   // Pan to new fixes (but stop fighting the user after they drag the map).
+  // GPS jitter makes a parked device "move" a few metres between uploads, so
+  // we only re-center when the device genuinely travelled since the last pan.
+  // Without this the map visibly slides on every upload cycle.
   useEffect(() => {
     const map = mapRef.current;
     if (!map || !markerPosition || !follow) return;
     const key = `${markerPosition[0].toFixed(5)},${markerPosition[1].toFixed(5)}`;
     if (lastFocusKey.current === key) return;
+
+    const last = lastFollowPoint.current;
+    if (last) {
+      const moved = haversineMeters(
+        { latitude: last[0], longitude: last[1] },
+        { latitude: markerPosition[0], longitude: markerPosition[1] },
+      );
+      if (moved != null && moved < FOLLOW_MIN_METERS) return;
+    }
+
     lastFocusKey.current = key;
+    lastFollowPoint.current = markerPosition;
     map.panTo(markerPosition, { animate: true, duration: 0.6 });
   }, [markerPosition, follow]);
 

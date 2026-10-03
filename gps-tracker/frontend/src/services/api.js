@@ -95,3 +95,45 @@ export function getRoute({ deviceId, range, from, to, limit = 5000, signal } = {
 export function getStats({ deviceId, range, from, to, signal } = {}) {
   return request(`/api/stats${buildQuery({ device_id: deviceId, range, from, to })}`, { signal });
 }
+
+/**
+ * Stream the full CSV export (every fix in the range, not capped at 1000)
+ * and trigger a browser download. Returns the blob size in bytes.
+ */
+export async function downloadHistoryCsv({ deviceId, range, from, to } = {}) {
+  let response;
+  try {
+    response = await fetch(
+      `${API_BASE_URL}/api/export${buildQuery({ device_id: deviceId, range, from, to })}`,
+      {
+        headers: {
+          Accept: 'text/csv',
+          ...(DASHBOARD_KEY ? { Authorization: `Bearer ${DASHBOARD_KEY}` } : {}),
+        },
+      },
+    );
+  } catch {
+    throw new ApiError(0, 'Cannot reach the server. Is the backend running?');
+  }
+
+  if (!response.ok) {
+    throw new ApiError(response.status, response.statusText || 'Export failed');
+  }
+
+  const blob = await response.blob();
+
+  // Honour the server's Content-Disposition filename when present.
+  const disposition = response.headers.get('Content-Disposition') ?? '';
+  const match = disposition.match(/filename="?([^";]+)"?/);
+  const filename = match?.[1]
+    ?? `gps-history-${new Date().toISOString().slice(0, 10)}.csv`;
+
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = filename;
+  link.click();
+  URL.revokeObjectURL(url);
+
+  return blob.size;
+}

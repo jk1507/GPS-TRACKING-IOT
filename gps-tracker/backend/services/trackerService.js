@@ -1,6 +1,6 @@
 import { config } from '../config/index.js';
 import { logger } from '../utils/logger.js';
-import { pathDistanceMeters } from '../utils/geo.js';
+import { haversineMeters, pathDistanceMeters } from '../utils/geo.js';
 import { secondsBetween, toNumber, toBoolean } from '../utils/time.js';
 import * as devices from '../models/deviceModel.js';
 import * as locations from '../models/locationModel.js';
@@ -140,6 +140,57 @@ export async function getHistory({
   };
 }
 
+// Distance/time speed estimates are only sane between two fixes that are
+// close in time; anything else is a data hole or a GPS jump, not motion.
+const DERIVE_MIN_DT_SECONDS = 1;
+const DERIVE_MAX_DT_SECONDS = 120;
+const DERIVE_MAX_SPEED_MPS = 75; // 270 km/h ceiling rejects jump artifacts
+
+/**
+ * Speed stats over an ordered track.
+ *
+ * Prefers the device-reported (Doppler) speed stored with each fix and falls
+ * back to distance/time between fixes when the device did not send one.
+ * Returns the maximum speed seen plus the distance covered and time spent
+ * actually moving (> 1 m/s), which ignore parked jitter.
+ */
+function computeSpeedStats(points = []) {
+  let maxSpeed = null;
+  let movingSeconds = 0;
+  let movingMeters = 0;
+
+  for (let i = 1; i < points.length; i += 1) {
+    const prev = points[i - 1];
+    const curr = points[i];
+    const dt = secondsBetween(prev.timestamp, curr.timestamp);
+    const meters = haversineMeters(prev, curr);
+
+    // NB: Number(null) === 0, so an absent speed must be checked explicitly
+    // or every legacy fix without a speed field would read as 0 m/s.
+    let speed = curr.speed == null || curr.speed === '' ? NaN : Number(curr.speed);
+    if (Number.isFinite(speed) && speed >= 0) {
+      // Trust the device-reported speed for this fix.
+    } else if (
+      dt !== null &&
+      dt >= DERIVE_MIN_DT_SECONDS &&
+      dt <= DERIVE_MAX_DT_SECONDS
+    ) {
+      speed = meters / dt;
+      if (!Number.isFinite(speed) || speed > DERIVE_MAX_SPEED_MPS) continue;
+    } else {
+      continue;
+    }
+
+    if (maxSpeed === null || speed > maxSpeed) maxSpeed = speed;
+    if (speed > 1 && dt !== null && dt > 0) {
+      movingSeconds += dt;
+      movingMeters += meters;
+    }
+  }
+
+  return { maxSpeed, movingSeconds, movingMeters };
+}
+
 /** Ordered track + derived distance/duration for the Route page. */
 export async function getRoute({
   deviceId,
@@ -156,6 +207,8 @@ export async function getRoute({
 
   const distanceMeters = pathDistanceMeters(points);
 
+  const { maxSpeed, movingSeconds, movingMeters } = computeSpeedStats(points);
+
   const first =
     points[0]?.timestamp ?? null;
 
@@ -170,6 +223,12 @@ export async function getRoute({
       first && last
         ? secondsBetween(first, last)
         : 0,
+    max_speed_mps: maxSpeed != null ? Math.round(maxSpeed * 100) / 100 : null,
+    avg_speed_mps:
+      movingSeconds > 0
+        ? Math.round((movingMeters / movingSeconds) * 100) / 100
+        : null,
+    moving_seconds: Math.round(movingSeconds),
     first_at: first,
     last_at: last,
     truncated: points.length >= limit,

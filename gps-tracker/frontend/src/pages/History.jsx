@@ -28,82 +28,6 @@ import {
 
 const PAGE_SIZE = 50;
 
-function downloadCsv(rows, filename) {
-  const header = [
-    'date',
-    'time',
-    'latitude',
-    'longitude',
-    'altitude',
-    'satellites',
-    'gps_fix',
-    'accuracy',
-    'speed',
-    'heading',
-    'wifi_connected',
-    'wifi_rssi',
-    'geolinker_status',
-    'render_status',
-    'timestamp',
-  ];
-
-  const escapeCsv = (value) => {
-    if (value === null || value === undefined) {
-      return '';
-    }
-
-    const stringValue = String(value);
-
-    if (
-      stringValue.includes(',') ||
-      stringValue.includes('"') ||
-      stringValue.includes('\n')
-    ) {
-      return `"${stringValue.replace(/"/g, '""')}"`;
-    }
-
-    return stringValue;
-  };
-
-  const body = rows.map((r) =>
-    [
-      formatDate(r.timestamp),
-      formatTime(r.timestamp),
-      r.latitude,
-      r.longitude,
-      r.altitude ?? '',
-      r.satellites ?? '',
-      r.gps_fix ?? '',
-      r.accuracy ?? '',
-      r.speed ?? '',
-      r.heading ?? '',
-      r.wifi_connected ?? '',
-      r.wifi_rssi ?? '',
-      r.geolinker_status ?? '',
-      r.render_status ?? '',
-      r.timestamp,
-    ]
-      .map(escapeCsv)
-      .join(','),
-  );
-
-  const blob = new Blob(
-    [[header.join(','), ...body].join('\n')],
-    {
-      type: 'text/csv;charset=utf-8',
-    },
-  );
-
-  const url = URL.createObjectURL(blob);
-  const link = document.createElement('a');
-
-  link.href = url;
-  link.download = filename;
-  link.click();
-
-  URL.revokeObjectURL(url);
-}
-
 function formatBoolean(value) {
   if (value === true) return 'YES';
   if (value === false) return 'NO';
@@ -153,22 +77,13 @@ export default function History() {
     setPage(0);
   };
 
+  // Streams the full selected range from GET /api/export - every fix, not
+  // just the first page the table shows.
   const exportAll = async () => {
     setExporting(true);
 
     try {
-      const res = await api.getHistory({
-        ...query,
-        limit: 1000,
-        offset: 0,
-      });
-
-      downloadCsv(
-        res.locations ?? [],
-        `gps-history-${new Date()
-          .toISOString()
-          .slice(0, 10)}.csv`,
-      );
+      await api.downloadHistoryCsv(query);
     } catch (err) {
       // eslint-disable-next-line no-alert
       window.alert(

@@ -16,6 +16,7 @@ import statsRoutes from './statsRoutes.js';
  *   GET  /api/locations        history page            (dashboard key)
  *   GET  /api/locations/latest most recent fix          (dashboard key)
  *   GET  /api/route            polyline + distance      (dashboard key)
+ *   GET  /api/export           full-range CSV download  (dashboard key)
  *   GET  /api/device           online/offline status    (dashboard key)
  *   GET  /api/devices          all known devices        (dashboard key)
  *   GET  /api/stats            dashboard aggregates     (dashboard key)

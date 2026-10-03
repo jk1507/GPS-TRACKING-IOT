@@ -13,5 +13,6 @@ router.post('/location', ingestLimiter, requireDeviceAuth, asyncHandler(location
 router.get('/locations/latest', requireDashboardAuth, asyncHandler(locationController.getLatestLocation));
 router.get('/locations', requireDashboardAuth, asyncHandler(locationController.getLocations));
 router.get('/route', requireDashboardAuth, asyncHandler(locationController.getRoute));
+router.get('/export', requireDashboardAuth, asyncHandler(locationController.exportLocationsCsv));
 
 export default router;

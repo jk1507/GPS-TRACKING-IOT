@@ -64,3 +64,80 @@ export async function getRoute(req, res) {
     ...route,
   });
 }
+
+// ---------------------------------------------------------------------------
+// CSV export
+// ---------------------------------------------------------------------------
+
+const CSV_COLUMNS = [
+  'device_id',
+  'timestamp',
+  'latitude',
+  'longitude',
+  'altitude',
+  'satellites',
+  'accuracy',
+  'speed',
+  'heading',
+  'gps_fix',
+  'wifi_connected',
+  'wifi_rssi',
+  'geolinker_status',
+  'render_status',
+  'created_at',
+];
+
+/** RFC-4180 escaping: quote only when needed, double embedded quotes. */
+function csvEscape(value) {
+  if (value === null || value === undefined) return '';
+  const text = String(value);
+  return /[",\n\r]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
+}
+
+// Page through the database instead of loading everything at once, and cap
+// hard so a runaway query can never exhaust memory.
+const EXPORT_PAGE_SIZE = 1000;
+const EXPORT_MAX_ROWS = 200_000;
+
+/**
+ * GET /api/export?range=today|from=&to=&device_id=
+ * Streams EVERY fix in the range as an Excel-friendly CSV download
+ * (UTF-8 BOM + CRLF), unlike /api/locations which paginates at 1000.
+ */
+export async function exportLocationsCsv(req, res) {
+  const deviceId = req.query.device_id || config.deviceId;
+  const { from, to } = resolveDateRange(req.query);
+
+  const safeDevice = String(deviceId).replace(/[^A-Za-z0-9_-]+/g, '_');
+  const suffix = from ? `${from.slice(0, 10)}_to_${String(to ?? '').slice(0, 10)}` : 'all-time';
+
+  res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+  res.setHeader(
+    'Content-Disposition',
+    `attachment; filename="gps-history-${safeDevice}-${suffix}.csv"`,
+  );
+  res.setHeader('Cache-Control', 'no-store');
+
+  res.write('\uFEFF'); // BOM so Excel auto-detects UTF-8
+  res.write(`${CSV_COLUMNS.join(',')}\r\n`);
+
+  let exported = 0;
+  for (let offset = 0; offset < EXPORT_MAX_ROWS; offset += EXPORT_PAGE_SIZE) {
+    const page = await locations.listLocations({
+      deviceId,
+      from,
+      to,
+      limit: EXPORT_PAGE_SIZE,
+      offset,
+    });
+
+    for (const row of page) {
+      res.write(`${CSV_COLUMNS.map((column) => csvEscape(row[column])).join(',')}\r\n`);
+      exported += 1;
+    }
+
+    if (page.length < EXPORT_PAGE_SIZE) break;
+  }
+
+  res.end();
+}

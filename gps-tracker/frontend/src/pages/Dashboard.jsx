@@ -23,6 +23,7 @@ import {
   formatDuration,
   formatNumber,
   formatRelative,
+  formatSpeed,
   formatTime,
 } from '../utils/format.js';
 
@@ -399,6 +400,43 @@ export default function Dashboard() {
           loading={routeLoading}
           hint={`${route?.count ?? 0} points tracked`}
         />
+
+        <StatCard
+          label="Speed"
+          value={speed != null ? formatSpeed(speed) : null}
+          icon="bolt"
+          tone="brand"
+          loading={trackerLoading}
+          hint={
+            heading != null
+              ? `heading ${Math.round(heading)}\u00b0`
+              : 'live GPS speed'
+          }
+        />
+
+        <StatCard
+          label="Max Speed"
+          value={
+            route?.max_speed_mps != null
+              ? formatSpeed(route.max_speed_mps)
+              : null
+          }
+          icon="activity"
+          loading={routeLoading}
+          hint={describeRange(range)}
+        />
+
+        <StatCard
+          label="Avg Speed"
+          value={
+            route?.avg_speed_mps != null
+              ? formatSpeed(route.avg_speed_mps)
+              : null
+          }
+          icon="activity"
+          loading={routeLoading}
+          hint="while moving"
+        />
       </div>
 
       {/* ---------------------------------------------------------
@@ -498,9 +536,7 @@ export default function Dashboard() {
             </p>
 
             <p className="mt-1 text-sm font-semibold text-slate-700 dark:text-slate-200">
-              {speed != null
-                ? Number(speed).toFixed(2)
-                : '—'}
+              {formatSpeed(speed)}
             </p>
           </div>
 

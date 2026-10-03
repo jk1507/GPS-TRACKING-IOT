@@ -11,7 +11,8 @@
 
    Behaviour
      - Reads NMEA sentences from the NEO-6M on UART1 (9600 baud)
-     - Parses $GxGGA (fix, satellites, altitude) and $GxRMC (date/time)
+     - Parses $GxGGA (fix, satellites, altitude, HDOP) and $GxRMC
+       (date/time, ground speed, course)
      - POSTs a JSON fix every 10 s, but only with a valid fix, non-zero
        coordinates and at least 4 satellites
      - Retries failed uploads and reconnects Wi-Fi automatically
@@ -56,6 +57,9 @@ struct GpsData {
   double longitude = 0.0;      // decimal degrees
   double altitude = 0.0;       // metres
   int satellites = 0;
+  double speedKnots = -1.0;    // RMC ground speed (knots); -1 = unknown
+  double course = -1.0;        // RMC track angle (degrees true); -1 = unknown
+  double hdop = -1.0;          // GGA HDOP; -1 = unknown
   char utcTime[12] = "";       // "hhmmss.sss"
   char utcDate[8] = "";        // "ddmmyy"
   uint32_t lastFixMs = 0;
@@ -138,6 +142,7 @@ void parseGga(char *fields[], int count) {
   gps.latitude = lat;
   gps.longitude = lon;
   gps.satellites = atoi(fields[7]);
+  if (count > 8 && fields[8][0] != '\0') gps.hdop = atof(fields[8]);
   gps.altitude = atof(fields[9]);
   strncpy(gps.utcTime, fields[1], sizeof(gps.utcTime) - 1);
   gps.lastFixMs = millis();
@@ -153,6 +158,10 @@ void parseRmc(char *fields[], int count) {
     return;
   }
   strncpy(gps.utcDate, fields[9], sizeof(gps.utcDate) - 1);
+
+  // RMC also carries ground speed (knots) and track angle (degrees true).
+  if (count > 7 && fields[7][0] != '\0') gps.speedKnots = atof(fields[7]);
+  if (count > 8 && fields[8][0] != '\0') gps.course = atof(fields[8]);
 }
 
 void handleNmeaLine(char *line) {
@@ -283,6 +292,19 @@ String buildPayload() {
   payload += "\"longitude\":" + String(gps.longitude, 6) + ",";
   payload += "\"altitude\":" + String(gps.altitude, 1) + ",";
   payload += "\"satellites\":" + String(gps.satellites) + ",";
+
+  // Ground speed (m/s), heading (degrees) and a rough accuracy estimate
+  // (HDOP x ~5 m for the NEO-6M). The backend already validates and stores
+  // all three - the dashboard uses them for the live speed card.
+  if (gps.speedKnots >= 0.0) {
+    payload += "\"speed\":" + String(gps.speedKnots * 0.514444, 2) + ",";
+  }
+  if (gps.course >= 0.0) {
+    payload += "\"heading\":" + String(gps.course, 1) + ",";
+  }
+  if (gps.hdop > 0.0) {
+    payload += "\"accuracy\":" + String(gps.hdop * 5.0, 1) + ",";
+  }
 
   String stamp = buildTimestamp();
   if (stamp.length() > 0) {
