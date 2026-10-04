@@ -18,8 +18,10 @@ One direction for writes (device -> DB -> socket), one for reads (browser -> RES
 
 ## ESP32 (device)
 
-- **`esp32/gps_tracker.ino`** — Reads NMEA over UART1, parses GGA/RMC, builds JSON, POSTs
-  a fix every 10s (only with a valid fix and >=4 satellites), drives the LED, retries and
+- **`esp32/gps_tracker.ino`** — Reads NMEA over UART1, parses GGA (fix, satellites,
+  altitude, HDOP) and RMC (date/time, ground speed, course), builds JSON, POSTs a fix
+  every 10s (only with a valid fix and >=4 satellites) including Doppler speed (m/s),
+  heading (degrees) and an HDOP-based accuracy estimate, drives the LED, retries and
   reconnects Wi-Fi. The sole producer of real data.
 - **`esp32/secrets.h.example`** — Template for Wi-Fi / `API_BASE_URL` / `API_SECRET` /
   `DEVICE_ID`; copied to the gitignored `secrets.h`.
@@ -37,12 +39,14 @@ One direction for writes (device -> DB -> socket), one for reads (browser -> RES
 ## Backend — HTTP layer
 
 - **`routes/locationRoutes.js`** — Maps ingest `POST /location` (+`ingestLimiter`,
-  `requireDeviceAuth`) and reads `GET /locations`, `/locations/latest`, `/route`
-  (`requireDashboardAuth`).
+  `requireDeviceAuth`) and reads `GET /locations`, `/locations/latest`, `/route`,
+  `/export` (`requireDashboardAuth`).
 - **`routes/deviceRoutes.js`** — `GET /device`, `GET /devices` (dashboard-auth).
 - **`routes/statsRoutes.js`** — `GET /stats` (dashboard-auth).
 - **`controllers/locationController.js`** — Parses/validates the ingest body, calls
-  `trackerService`, returns 201; serves history/route/latest reads.
+  `trackerService`, returns 201; serves history/route/latest reads; streams the
+  full-range CSV download (`GET /export`: paged queries -> UTF-8 BOM + CRLF, RFC-4180
+  escaping, 200k-row cap).
 - **`controllers/deviceController.js`** — Returns one device's live status or all devices'
   statuses.
 - **`controllers/statsController.js`** — Dashboard aggregates + public non-secret `/config`.
@@ -51,7 +55,10 @@ One direction for writes (device -> DB -> socket), one for reads (browser -> RES
 
 - **`services/trackerService.js`** — The core: computes device ONLINE/OFFLINE,
   `ingestLocation` (ensure device -> insert -> touch -> broadcast), `getHistory`,
-  `getRoute`, `getDashboardStats`. Controllers never touch models directly for logic.
+  `getRoute` (distance/duration plus speed stats: `max_speed_mps`, moving-average
+  `avg_speed_mps`, `moving_seconds` — device-reported Doppler speed preferred, sane
+  distance/time fallback otherwise), `getDashboardStats`. Controllers never touch models
+  directly for logic.
 
 ## Backend — data layer
 
@@ -92,7 +99,8 @@ One direction for writes (device -> DB -> socket), one for reads (browser -> RES
   `<BrowserRouter><ThemeProvider><TrackerProvider><App/></TrackerProvider></ThemeProvider></BrowserRouter>`.
 - **`App.jsx`** — Route table mapping pages under `<Layout>`.
 - **`services/api.js`** — `fetch` wrapper for all REST reads; injects the optional dashboard
-  key, defines `ApiError`.
+  key, defines `ApiError`; `downloadHistoryCsv` streams the full-range CSV export to a
+  browser download.
 - **`services/socket.js`** — Creates the Socket.IO client (same base URL, auth token).
 - **`context/TrackerContext.jsx`** — The heart: boot config + snapshot, subscribe to socket
   events, 15s polling fallback, derives ONLINE/OFFLINE from server `last_seen_at`. Every
@@ -104,7 +112,7 @@ One direction for writes (device -> DB -> socket), one for reads (browser -> RES
 - **`hooks/useApiResource.js`** — Generic fetch-with-deps/loading/error/reload hook used by
   pages.
 - **`hooks/useNow.js`** — Ticking clock so offline status re-evaluates.
-- **`utils/format.js`** — Date/duration/distance/coord formatters.
+- **`utils/format.js`** — Date/duration/distance/speed/coord formatters.
 - **`utils/range.js`** — Range presets + converting a UI range into an API query.
 - **`utils/track.js`** — Travel analysis: haversine distance, stop detection (splits the
   track into legs between stops) and appending live socket fixes to the drawn trail.
@@ -116,7 +124,9 @@ One direction for writes (device -> DB -> socket), one for reads (browser -> RES
 - **`components/MapView.jsx`** — Leaflet map (OSM/Esri only): dotted travel-flow trail
   split into legs between detected stops, start/stop/current pins with popups, accuracy
   circle, follow/fit controls, legend, and four detail layers (street, terrain, satellite,
-  hybrid). Used by Dashboard, LiveMap, History, Route, Device.
+  hybrid). Auto-follow re-centers only after the device moved >=25 m since the last pan,
+  so GPS jitter between uploads never makes the map slide. Used by Dashboard, LiveMap,
+  History, Route, Device.
 - **`components/StatusPill.jsx`** — ONLINE/OFFLINE badge and realtime-connection pill.
 - **`components/RangeFilter.jsx`** — Preset/custom date-range picker.
 - **`components/ui.jsx`** — Shared primitives (`StatCard`, `PageHeader`, `InfoRow`,
@@ -127,9 +137,11 @@ One direction for writes (device -> DB -> socket), one for reads (browser -> RES
 
 All pages consume `TrackerContext` and/or `useApiResource`.
 
-- **`pages/Dashboard.jsx`** — Stat cards + live map + recent fixes.
+- **`pages/Dashboard.jsx`** — Stat cards (position, distance, live speed, max/avg speed
+  over the range) + live map + recent fixes.
 - **`pages/LiveMap.jsx`** — Big live map + current-fix/route side panels.
-- **`pages/History.jsx`** — Paginated table, CSV export, optional map.
+- **`pages/History.jsx`** — Paginated table, full-range CSV export via `/api/export`,
+  optional map.
 - **`pages/Route.jsx`** — Track polyline + distance/duration stats.
 - **`pages/Device.jsx`** — Device identity, connectivity, records, mini map.
 - **`pages/Settings.jsx`** — Theme, connection info, copyable ingest `curl`.

@@ -3,7 +3,8 @@
 A complete, production-ready real-time GPS tracking system for an **ESP32 + NEO-6M** module.
 
 The ESP32 reads NMEA data from the GPS module and `POST`s latitude, longitude, altitude,
-satellite count and timestamp to your own backend. The backend stores every fix, broadcasts
+satellite count, timestamp, plus **Doppler speed, heading and an HDOP-based accuracy
+estimate** to your own backend. The backend stores every fix, broadcasts
 it over WebSocket and serves a React dashboard that draws the live position and the travels
 path on an OpenStreetMap map.
 
@@ -16,6 +17,10 @@ ESP32 + NEO-6M  ──HTTP POST /api/location──▶  Node/Express + SQLite  �
 - **Backend:** Node.js + Express, REST + Socket.IO, SQLite (dev) designed for PostgreSQL (prod)
 - **Device:** ESP32-WROOM-32 + NEO-6M, HTTP upload, onboard LED status
 - **Maps:** OpenStreetMap + Esri satellite tiles. **No Google Maps API.**
+
+**Dashboard highlights:** live speed (km/h) + heading, total distance plus max/average
+speed for any date range, auto-detected stops on the dotted travel trail, and a one-click
+full-range CSV export from the History page.
 
 ---
 
@@ -255,6 +260,9 @@ curl -X POST http://localhost:4000/api/location \
     "longitude": 83.198760,
     "altitude": 25.4,
     "satellites": 7,
+    "speed": 4.2,
+    "heading": 91.5,
+    "accuracy": 12.5,
     "timestamp": "2026-09-30T21:30:00"
   }'
 ```
@@ -282,6 +290,7 @@ Read endpoints (PowerShell: use `curl.exe`):
 curl "http://localhost:4000/api/locations?range=today&limit=20"
 curl "http://localhost:4000/api/locations?from=2026-09-01T00:00:00Z&to=2026-09-30T23:59:59Z"
 curl "http://localhost:4000/api/route?range=today"
+curl "http://localhost:4000/api/export?range=today" -o gps-history.csv
 curl "http://localhost:4000/api/stats?range=7d"
 ```
 
@@ -345,7 +354,7 @@ the `locations` table, which are only written by `POST /api/location`.
 | POST   | `/api/location`         | Device key    | Store a fix and broadcast it              |
 | GET    | `/api/locations`        | Dashboard key | History (`range`/`from`/`to`, `limit`, `offset`) |
 | GET    | `/api/locations/latest` | Dashboard key | Most recent fix + device status           |
-| GET    | `/api/route`            | Dashboard key | Polyline points + distance/duration       |
+| GET    | `/api/route`            | Dashboard key | Polyline + distance/duration + max/avg speed |
 | GET    | `/api/export`           | Dashboard key | Full-range CSV download (every fix)       |
 | GET    | `/api/device`           | Dashboard key | Online/offline status for one device      |
 | GET    | `/api/devices`          | Dashboard key | All known devices                         |
@@ -378,6 +387,7 @@ flips to OFFLINE immediately.
 | Dashboard shows `Waiting for GPS data…` | No fix yet — give the NEO-6M a clear view of the sky (first fix can take a minute). |
 | `Rejected (0,0) coordinates` | The module has no fix. Wait for ≥4 satellites. |
 | Marker never moves | Confirm uploads in the Serial Monitor; check `/api/health`. |
+| Speed / Accuracy cards show `—` | Firmware predates speed/HDOP parsing — re-flash the updated `gps_tracker.ino`. Old firmware still works: speed stats fall back to position-based estimates. |
 | Wi-Fi keeps dropping | Ensure a 2.4 GHz network; the ESP32 cannot see 5 GHz. |
 | Frontend can't reach the API | Backend not running, or wrong `VITE_API_URL`/`VITE_PROXY_TARGET`. |
 

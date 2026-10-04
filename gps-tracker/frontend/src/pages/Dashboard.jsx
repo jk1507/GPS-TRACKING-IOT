@@ -27,9 +27,44 @@ import {
   formatTime,
 } from '../utils/format.js';
 
-import { defaultRange, rangeToQuery } from '../utils/range.js';
+import {
+  defaultRange,
+  rangeToQuery,
+  RANGE_PRESETS,
+} from '../utils/range.js';
 import { appendLivePoint } from '../utils/track.js';
-import { useState } from 'react';
+import { useNow } from '../hooks/useNow.js';
+import { useEffect, useState } from 'react';
+
+// Fixes that are flagged as broken, sit on (0,0), or carry a wildly
+// inaccurate reading only add spikes to the trail - never draw them, so the
+// dotted line keeps following the path the device really travelled.
+const MAX_TRUSTED_ACCURACY_M = 75;
+
+function isPlottable(point) {
+  if (!point) return false;
+  const lat = Number(point.latitude);
+  const lng = Number(point.longitude);
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) return false;
+  if (lat === 0 && lng === 0) return false; // "null island" = no fix
+  if (point.gps_fix === false) return false;
+  const accuracy = Number(point.accuracy);
+  if (Number.isFinite(accuracy) && accuracy > MAX_TRUSTED_ACCURACY_M) return false;
+  return true;
+}
+
+// Is this fix inside the open tracking session? Also applied client-side so
+// the previous range trail never flashes in while the session fetch is in
+// flight right after Start is clicked.
+function inSession(point, session) {
+  if (!session) return true;
+  if (!point) return false;
+  const ts = new Date(point.timestamp).getTime();
+  if (!Number.isFinite(ts)) return false;
+  if (ts < session.from) return false;
+  if (session.to != null && ts > session.to) return false;
+  return true;
+}
 
 export default function Dashboard() {
   const {
@@ -42,6 +77,16 @@ export default function Dashboard() {
   } = useTracker();
 
   const [range, setRange] = useState(defaultRange);
+
+  // Tracking session: { from, to } epoch ms. `to: null` = currently recording.
+  // While a session exists the map trail is scoped to Start -> Stop instead
+  // of the selected date range.
+  const [session, setSession] = useState(null);
+  const [routeTick, setRouteTick] = useState(0);
+  const [exporting, setExporting] = useState(false);
+
+  const now = useNow(1000);
+  const tracking = session != null && session.to == null;
 
   const {
     data: stats,
@@ -68,18 +113,43 @@ export default function Dashboard() {
     [range.preset, range.from, range.to],
   );
 
+  // While a session is open the route is fetched with from=Start / to=Stop so
+  // only THIS trip is drawn; otherwise the selected range applies.
+  const routeQuery = session
+    ? {
+        from: new Date(session.from).toISOString(),
+        ...(session.to ? { to: new Date(session.to).toISOString() } : {}),
+        limit: 2000,
+      }
+    : { ...rangeToQuery(range), limit: 2000 };
+
   const {
     data: route,
     loading: routeLoading,
+    error: routeError,
+    reload: reloadRoute,
   } = useApiResource(
-    () =>
-      api.getRoute({
-        range: range.preset === 'custom' ? undefined : range.preset,
-        ...rangeToQuery(range),
-        limit: 2000,
-      }),
-    [range.preset, range.from, range.to],
+    () => api.getRoute(routeQuery),
+    [
+      session?.from ?? null,
+      session?.to ?? null,
+      range.preset,
+      range.from,
+      range.to,
+      routeTick,
+    ],
   );
+
+  // While recording, re-sync the session trail with the server every few
+  // seconds - covers missed socket pushes without waiting for a page change.
+  useEffect(() => {
+    if (!tracking) return undefined;
+    const id = setInterval(
+      () => setRouteTick((tick) => tick + 1),
+      5000,
+    );
+    return () => clearInterval(id);
+  }, [tracking]);
 
   // ---------------------------------------------------------
   // Latest GPS values
@@ -150,12 +220,14 @@ export default function Dashboard() {
     trackerError ||
     statsError?.message ||
     historyError?.message ||
+    routeError?.message ||
     null;
 
   const retryAll = () => {
     refresh().catch(() => {});
     reloadStats();
     reloadHistory();
+    reloadRoute();
   };
 
   // (0,0) is "null island": the ESP32 reports it when there is no fix, so it
@@ -174,10 +246,9 @@ export default function Dashboard() {
     gpsFix === false || (hasCoordinates && isNullIsland);
 
   const hasFix =
-    hasCoordinates && !isNullIsland && gpsFix !== false;
-
-  const nearby =
-    route?.points?.slice(-300) ?? [];
+    hasCoordinates && !isNullIsland && gpsFix !== false;  const nearby = (route?.points ?? [])
+    .filter((point) => isPlottable(point) && inSession(point, session))
+    .slice(-300);
 
   const markerPoint = hasFix
     ? {
@@ -188,8 +259,59 @@ export default function Dashboard() {
       }
     : null;
 
-  // Grow the dotted trail with each fix that arrives over the socket.
-  const nearbyPath = appendLivePoint(nearby, markerPoint);
+  // Grow the dotted trail with each fix that arrives over the socket - but
+  // only while recording; a stopped session stays frozen so the completed
+  // route can be reviewed. (No session = classic range trail + live growth.)
+  const livePoint = inSession(markerPoint, session)
+    ? markerPoint
+    : null;
+
+  const nearbyPath = tracking || !session
+    ? appendLivePoint(nearby, livePoint)
+    : nearby;
+
+  const startTracking = () =>
+    setSession({ from: Date.now(), to: null });
+
+  const stopTracking = () =>
+    setSession((prev) =>
+      prev ? { ...prev, to: Date.now() } : prev,
+    );
+
+  const clearSession = () => setSession(null);
+
+  // Streams the whole selected range as CSV (same endpoint as the
+  // History page, so you can export straight from the dashboard).
+  const exportCsv = async () => {
+    setExporting(true);
+    try {
+      await api.downloadHistoryCsv(rangeToQuery(range));
+    } catch (err) {
+      // eslint-disable-next-line no-alert
+      window.alert(err.message || 'Export failed');
+    } finally {
+      setExporting(false);
+    }
+  };
+
+  const sessionSeconds = session
+    ? Math.max(
+        0,
+        Math.floor(
+          ((session.to ?? now) - session.from) / 1000,
+        ),
+      )
+    : 0;
+
+  // Stat cards follow the map's scope: trip stats while a session is open,
+  // otherwise the selected range (presets get their friendly label).
+  const rangeLabel =
+    range.preset === 'custom'
+      ? describeRange({ from: range.from || null, to: range.to || null })
+      : RANGE_PRESETS.find((preset) => preset.value === range.preset)
+          ?.label ?? describeRange(range);
+
+  const scopeLabel = session ? 'this trip' : rangeLabel;
 
   return (
     <div>
@@ -201,6 +323,74 @@ export default function Dashboard() {
             <span className="hidden sm:inline-flex">
               <DeviceStatusPill />
             </span>
+
+            {session ? (
+              <span
+                className={`chip ${
+                  tracking
+                    ? 'bg-rose-50 text-rose-600 dark:bg-rose-950/50 dark:text-rose-300'
+                    : 'bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-300'
+                }`}
+              >
+                <span
+                  className={`h-2 w-2 rounded-full ${
+                    tracking
+                      ? 'animate-pulse bg-rose-500'
+                      : 'bg-slate-400'
+                  }`}
+                />
+                {tracking
+                  ? `Tracking ${formatDuration(sessionSeconds)}`
+                  : `Trip ${formatDuration(sessionSeconds)}`}
+              </span>
+            ) : null}
+
+            <button
+              type="button"
+              onClick={tracking ? stopTracking : startTracking}
+              className={`btn btn-sm ${
+                tracking
+                  ? 'bg-rose-500 text-white hover:bg-rose-400'
+                  : 'btn-outline'
+              }`}
+              title={
+                tracking
+                  ? 'Stop recording this trip'
+                  : 'Start recording the route'
+              }
+            >
+              <Icon
+                name={tracking ? 'stop' : 'play'}
+                size={12}
+              />
+              {tracking ? 'Stop' : 'Start tracking'}
+            </button>
+
+            {!tracking && session ? (
+              <button
+                type="button"
+                onClick={clearSession}
+                className="btn btn-ghost btn-sm"
+                title="Clear the trip and show the selected range again"
+              >
+                <Icon name="refresh" size={13} />
+                Clear
+              </button>
+            ) : null}
+
+            <button
+              type="button"
+              onClick={exportCsv}
+              className="btn btn-outline btn-sm"
+              disabled={
+                exporting ||
+                (stats != null && !(stats.locations_recorded > 0))
+              }
+              title="Download every fix in the selected range as CSV"
+            >
+              <Icon name="download" size={14} />
+              {exporting ? 'Exporting…' : 'CSV'}
+            </button>
 
             <RangeFilter
               value={range}
@@ -384,7 +574,7 @@ export default function Dashboard() {
           )}
           icon="list"
           loading={statsLoading}
-          hint={describeRange(range)}
+          hint={rangeLabel}
         />
 
         <StatCard
@@ -398,7 +588,7 @@ export default function Dashboard() {
           }
           icon="route"
           loading={routeLoading}
-          hint={`${route?.count ?? 0} points tracked`}
+          hint={`${route?.count ?? 0} points · ${scopeLabel}`}
         />
 
         <StatCard
@@ -423,7 +613,7 @@ export default function Dashboard() {
           }
           icon="activity"
           loading={routeLoading}
-          hint={describeRange(range)}
+          hint={scopeLabel}
         />
 
         <StatCard
@@ -435,7 +625,11 @@ export default function Dashboard() {
           }
           icon="activity"
           loading={routeLoading}
-          hint="while moving"
+          hint={
+            route?.avg_speed_mps != null
+              ? 'while moving'
+              : scopeLabel
+          }
         />
       </div>
 
@@ -571,9 +765,18 @@ export default function Dashboard() {
       <div className="mt-5 grid gap-5 lg:grid-cols-3">
         <div className="lg:col-span-2">
           <div className="mb-2 flex items-center justify-between">
-            <h2 className="text-sm font-semibold text-slate-700 dark:text-slate-200">
-              Live position
-            </h2>
+            <div className="flex flex-wrap items-center gap-2">
+              <h2 className="text-sm font-semibold text-slate-700 dark:text-slate-200">
+                Live position
+              </h2>
+
+              {tracking && nearbyPath.length < 2 ? (
+                <span className="chip bg-brand-50 text-brand-600 dark:bg-brand-500/10 dark:text-brand-400">
+                  <span className="h-2 w-2 animate-pulse rounded-full bg-brand-500" />
+                  Recording &mdash; waiting for fixes
+                </span>
+              ) : null}
+            </div>
 
             <Link
               to="/map"

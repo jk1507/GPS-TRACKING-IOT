@@ -79,17 +79,17 @@ const FOLLOW_MIN_METERS = 25;
 // on top of both street maps and satellite imagery.
 const CASING_STYLE = {
   color: '#0f172a',
-  weight: 8,
-  opacity: 0.16,
+  weight: 10,
+  opacity: 0.2,
   lineCap: 'round',
   lineJoin: 'round',
 };
 
 const FLOW_STYLE = {
   color: '#22d3ee',
-  weight: 4,
+  weight: 5,
   opacity: 0.95,
-  dashArray: '0.5, 11', // round dots = the travelled flow
+  dashArray: '0.5, 12', // round dots = the travelled flow
   lineCap: 'round',
   lineJoin: 'round',
 };
@@ -200,6 +200,8 @@ export default function MapView({
   const endIcon = useMemo(() => createEndpointIcon('#06b6d4'), []);
   const stopIcon = useMemo(() => createStopIcon(), []);
 
+  const tiles = TILES[layer] ?? TILES.map;
+
   const centerOnDevice = () => {
     const map = mapRef.current;
     if (!map || !markerPosition) return;
@@ -246,7 +248,15 @@ export default function MapView({
     map.fitBounds(positions, { padding: [40, 40] });
   }, [positions, autoFit]);
 
-  const tiles = TILES[layer] ?? TILES.map;
+  // Keep the map's zoom range in sync with the selected tile layer so we
+  // never zoom past what the provider serves (gray tiles beyond it).
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map) return;
+    map.setMaxZoom(tiles.maxZoom);
+    if (map.getZoom() > tiles.maxZoom) map.setZoom(tiles.maxZoom);
+  }, [tiles.maxZoom, ready]);
+
   const trailLength = pathDistanceMeters(points);
   const endPoint = positions.length ? positions[positions.length - 1] : null;
 
@@ -256,6 +266,9 @@ export default function MapView({
         center={markerPosition ?? DEFAULT_CENTER}
         zoom={markerPosition ? zoom : DEFAULT_ZOOM}
         scrollWheelZoom
+        // We render our own +/- buttons below: Leaflet's default control
+        // sits top-left, underneath the overlay buttons, so it was invisible.
+        zoomControl={false}
         className={`h-full w-full ${isDark && tiles.invertInDark ? 'map-dark' : ''}`}
         worldCopyJump
       >
@@ -410,7 +423,31 @@ export default function MapView({
           ) : null}
         </div>
 
-        <div className="pointer-events-auto flex gap-1 rounded-xl border border-slate-200 bg-white/90 p-1 backdrop-blur dark:border-slate-700 dark:bg-slate-900/90">
+        <div className="flex flex-col items-end gap-2">
+          {/* Zoom in / out - always visible on every layer */}
+          <div className="pointer-events-auto flex flex-col gap-1 rounded-xl border border-slate-200 bg-white/90 p-1 backdrop-blur dark:border-slate-700 dark:bg-slate-900/90">
+            <button
+              type="button"
+              onClick={() => mapRef.current?.zoomIn()}
+              className="rounded-lg px-2.5 py-1.5 text-slate-600 transition-colors hover:bg-slate-100 dark:text-slate-300 dark:hover:bg-slate-800"
+              title="Zoom in"
+              aria-label="Zoom in"
+            >
+              <Icon name="plus" size={14} />
+            </button>
+
+            <button
+              type="button"
+              onClick={() => mapRef.current?.zoomOut()}
+              className="rounded-lg px-2.5 py-1.5 text-slate-600 transition-colors hover:bg-slate-100 dark:text-slate-300 dark:hover:bg-slate-800"
+              title="Zoom out"
+              aria-label="Zoom out"
+            >
+              <Icon name="minus" size={14} />
+            </button>
+          </div>
+
+          <div className="pointer-events-auto flex gap-1 rounded-xl border border-slate-200 bg-white/90 p-1 backdrop-blur dark:border-slate-700 dark:bg-slate-900/90">
           {Object.entries(TILES).map(([key, value]) => (
             <button
               key={key}
@@ -425,6 +462,7 @@ export default function MapView({
               <span className="hidden sm:inline">{value.label}</span>
             </button>
           ))}
+          </div>
         </div>
       </div>
 

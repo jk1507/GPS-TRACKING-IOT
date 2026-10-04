@@ -152,6 +152,10 @@ const ICONS = {
       <path d="M14 11a5 5 0 0 0-7.07 0l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71" />
     </>
   ),
+  play: <path d="M8 5.4v13.2L19 12 8 5.4Z" fill="currentColor" strokeLinejoin="round" />,
+  stop: <rect x="6.5" y="6.5" width="11" height="11" rx="2.5" fill="currentColor" />,
+  plus: <path d="M12 5v14M5 12h14" />,
+  minus: <path d="M5 12h14" />,
 };
 
 export default function Icon({ name, size = 18, className = '', strokeWidth = 1.8, ...rest }) {
