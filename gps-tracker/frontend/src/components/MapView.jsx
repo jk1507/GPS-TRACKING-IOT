@@ -6,6 +6,7 @@ import {
   Popup,
   Polyline,
   Circle,
+  CircleMarker,
   ScaleControl,
   useMap,
 } from 'react-leaflet';
@@ -146,6 +147,7 @@ const toLatLngs = (points) =>
  * @param follow   pan the map to the marker as it moves (default true)
  * @param autoFit  fit the map to `path` whenever the route changes
  * @param loading  show a "waiting for data" overlay
+ * @param showPointMarkers render a visible dot marker for every coordinate along the path
  */
 export default function MapView({
   marker = null,
@@ -153,6 +155,7 @@ export default function MapView({
   online = false,
   follow = true,
   autoFit = false,
+  showPointMarkers = true,
   loading = false,
   emptyMessage = 'Waiting for GPS data\u2026',
   className = 'h-[60vh]',
@@ -292,6 +295,39 @@ export default function MapView({
             <Polyline positions={segment} pathOptions={FLOW_STYLE} />
           </Fragment>
         ))}
+
+        {/* Visible point markers for every GPS coordinate along the route */}
+        {showPointMarkers &&
+          points.map((p, index) => (
+            <CircleMarker
+              key={`pt-${p.id || index}-${p.timestamp || p.latitude}`}
+              center={[Number(p.latitude), Number(p.longitude)]}
+              radius={4}
+              pathOptions={{
+                color: '#0284c7',
+                fillColor: '#38bdf8',
+                fillOpacity: 0.95,
+                weight: 1.5,
+              }}
+            >
+              <Popup>
+                <div className="space-y-0.5 text-xs">
+                  <p className="font-semibold text-slate-900 dark:text-white">
+                    GPS Fix #{index + 1}
+                  </p>
+                  <p>
+                    Lat: {formatCoord(p.latitude)} <br />
+                    Lng: {formatCoord(p.longitude)}
+                  </p>
+                  <p>
+                    Speed: {p.speed != null ? `${Number(p.speed).toFixed(2)} km/h` : '—'} &middot; Alt:{' '}
+                    {p.altitude != null ? `${Number(p.altitude).toFixed(1)} m` : '—'}
+                  </p>
+                  <p className="text-slate-500">{formatDateTime(p.timestamp)}</p>
+                </div>
+              </Popup>
+            </CircleMarker>
+          ))}
 
         {/* Journey endpoints */}
         {positions.length > 1 ? (

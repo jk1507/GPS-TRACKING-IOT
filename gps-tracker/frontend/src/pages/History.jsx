@@ -1,30 +1,20 @@
-import { useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 
+import { useTracker } from '../context/TrackerContext.jsx';
 import * as api from '../services/api.js';
-import { useApiResource } from '../hooks/useApiResource.js';
-import RangeFilter from '../components/RangeFilter.jsx';
 import MapView from '../components/MapView.jsx';
 import Icon from '../components/Icon.jsx';
+
 import {
   EmptyState,
-  ErrorBanner,
   PageHeader,
-  Spinner,
 } from '../components/ui.jsx';
 
 import {
-  describeRange,
   formatCoord,
   formatDate,
-  formatDateTime,
   formatTime,
 } from '../utils/format.js';
-
-import {
-  defaultRange,
-  rangeToQuery,
-  RANGE_PRESETS,
-} from '../utils/range.js';
 
 const PAGE_SIZE = 50;
 
@@ -34,327 +24,322 @@ function formatBoolean(value) {
   return '—';
 }
 
+function downloadCsv(rows, filename) {
+  const header = [
+    'date',
+    'time',
+    'latitude',
+    'longitude',
+    'altitude',
+    'satellites',
+    'gps_fix',
+    'accuracy',
+    'speed',
+    'heading',
+    'wifi_connected',
+    'wifi_rssi',
+    'geolinker_status',
+    'render_status',
+    'timestamp',
+  ];
+
+  const escapeCsv = (value) => {
+    if (value === null || value === undefined) {
+      return '';
+    }
+
+    const stringValue = String(value);
+
+    if (
+      stringValue.includes(',') ||
+      stringValue.includes('"') ||
+      stringValue.includes('\n')
+    ) {
+      return `"${stringValue.replace(/"/g, '""')}"`;
+    }
+
+    return stringValue;
+  };
+
+  const body = rows.map((row) =>
+    [
+      formatDate(row.timestamp),
+      formatTime(row.timestamp),
+      row.latitude,
+      row.longitude,
+      row.altitude ?? '',
+      row.satellites ?? '',
+      row.gps_fix ?? '',
+      row.accuracy ?? '',
+      row.speed ?? '',
+      row.heading ?? '',
+      row.wifi_connected ?? '',
+      row.wifi_rssi ?? '',
+      row.geolinker_status ?? '',
+      row.render_status ?? '',
+      row.timestamp,
+    ]
+      .map(escapeCsv)
+      .join(','),
+  );
+
+  const csv = [header.join(','), ...body].join('\n');
+
+  const blob = new Blob([csv], {
+    type: 'text/csv;charset=utf-8',
+  });
+
+  const url = URL.createObjectURL(blob);
+
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = filename;
+
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+
+  URL.revokeObjectURL(url);
+}
+
 export default function History() {
-  const [range, setRange] = useState(defaultRange);
+  const { frontendHistory, clearFrontendHistory, addFrontendPoint } = useTracker();
   const [page, setPage] = useState(0);
   const [showMap, setShowMap] = useState(false);
   const [exporting, setExporting] = useState(false);
 
-  const query = rangeToQuery(range);
+  // Seed frontend history with backend locations if available on load
+  useEffect(() => {
+    (async () => {
+      try {
+        const res = await api.getHistory({ limit: 100 });
+        if (res?.locations && Array.isArray(res.locations)) {
+          // Add in chronological order
+          const sorted = [...res.locations].reverse();
+          sorted.forEach((loc) => addFrontendPoint(loc));
+        }
+      } catch {
+        // Ignore API fetch error, frontend history will rely on live socket + localStorage
+      }
+    })();
+  }, [addFrontendPoint]);
 
-  const deps = [
-    range.preset,
-    range.from,
-    range.to,
-    page,
-  ];
+  // Display newest fixes first in table
+  const reversedHistory = useMemo(() => {
+    return [...frontendHistory].reverse();
+  }, [frontendHistory]);
 
-  const {
-    data,
-    loading,
-    error,
-    reload,
-  } = useApiResource(
-    () =>
-      api.getHistory({
-        ...query,
-        limit: PAGE_SIZE,
-        offset: page * PAGE_SIZE,
-      }),
-    deps,
-  );
+  const total = reversedHistory.length;
+  const pageCount = Math.max(1, Math.ceil(total / PAGE_SIZE));
+  const currentPageRows = useMemo(() => {
+    const start = page * PAGE_SIZE;
+    return reversedHistory.slice(start, start + PAGE_SIZE);
+  }, [reversedHistory, page]);
 
-  const rows = data?.locations ?? [];
-  const total = data?.pagination?.total ?? 0;
+  /*
+   * Clear only the frontend history.
+   * Does NOT delete or modify anything in the backend/database.
+   */
+  const handleClearHistory = () => {
+    if (frontendHistory.length === 0) return;
 
-  const pageCount = Math.max(
-    1,
-    Math.ceil(total / PAGE_SIZE),
-  );
+    const confirmed = window.confirm(
+      'Clear the frontend GPS history?\n\n' +
+        'This will clear stored points from your browser (localStorage). ' +
+        'It will NOT delete or modify anything in the backend or database.',
+    );
 
-  const changeRange = (next) => {
-    setRange(next);
+    if (!confirmed) return;
+
+    clearFrontendHistory();
     setPage(0);
   };
 
-  // Streams the full selected range from GET /api/export - every fix, not
-  // just the first page the table shows.
-  const exportAll = async () => {
-    setExporting(true);
+  /*
+   * Download the entire frontend history as a CSV file.
+   */
+  const exportFrontendCsv = () => {
+    if (frontendHistory.length === 0) return;
 
     try {
-      await api.downloadHistoryCsv(query);
-    } catch (err) {
-      // eslint-disable-next-line no-alert
-      window.alert(
-        err.message || 'Export failed',
+      setExporting(true);
+      downloadCsv(
+        reversedHistory,
+        `frontend-gps-history-${new Date().toISOString().slice(0, 10)}.csv`,
       );
     } finally {
       setExporting(false);
     }
   };
 
-  const mapPath = [...rows]
-    .reverse()
-    .map((r) => ({
-      latitude: r.latitude,
-      longitude: r.longitude,
-      timestamp: r.timestamp,
-      speed: r.speed,
-    }));
-
-  const rangeLabel =
-    range.preset === 'custom'
-      ? describeRange({
-          from: range.from || null,
-          to: range.to || null,
-        })
-      : (
-          RANGE_PRESETS.find(
-            (p) => p.value === range.preset,
-          )?.label ?? range.preset
-        );
+  const mapPath = useMemo(() => {
+    return frontendHistory
+      .filter(
+        (row) =>
+          Number.isFinite(Number(row.latitude)) &&
+          Number.isFinite(Number(row.longitude)),
+      )
+      .map((row) => ({
+        latitude: Number(row.latitude),
+        longitude: Number(row.longitude),
+        timestamp: row.timestamp,
+        speed: row.speed,
+      }));
+  }, [frontendHistory]);
 
   return (
     <div>
       <PageHeader
-        title="Location History"
-        subtitle="Every valid GPS fix stored by the backend"
+        title="Frontend GPS History"
+        subtitle="Realtime GPS coordinates stored locally in your browser"
         actions={
           <>
-            <RangeFilter
-              value={range}
-              onChange={changeRange}
-            />
+            <button
+              type="button"
+              onClick={exportFrontendCsv}
+              className="btn btn-outline btn-sm"
+              disabled={exporting || frontendHistory.length === 0}
+            >
+              <Icon name="download" size={14} />
+              {exporting ? 'Exporting…' : 'Download CSV'}
+            </button>
 
             <button
               type="button"
-              onClick={exportAll}
-              className="btn btn-outline btn-sm"
-              disabled={
-                exporting || total === 0
-              }
+              onClick={handleClearHistory}
+              className="btn btn-outline btn-sm text-rose-600 border-rose-200 hover:bg-rose-50 dark:border-rose-900/50 dark:hover:bg-rose-950/30"
+              disabled={frontendHistory.length === 0}
             >
-              <Icon
-                name="download"
-                size={14}
-              />
-
-              {exporting
-                ? 'Exporting…'
-                : 'CSV'}
+              <Icon name="trash" size={14} />
+              Clear History
             </button>
           </>
         }
       />
 
-      <ErrorBanner
-        message={error?.message}
-        onRetry={reload}
-        className="mb-4"
-      />
-
       <div className="card overflow-hidden">
         <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-200 px-4 py-3 dark:border-slate-800">
-          <p className="text-sm text-slate-500 dark:text-slate-400">
-            <span className="font-semibold text-slate-700 dark:text-slate-200">
-              {total}
-            </span>{' '}
-            records · {rangeLabel}
-          </p>
+          <div>
+            <p className="text-sm text-slate-500 dark:text-slate-400">
+              <span className="font-semibold text-slate-700 dark:text-slate-200">
+                {total}
+              </span>{' '}
+              frontend-stored GPS points
+            </p>
+            <p className="mt-0.5 text-xs text-slate-400">
+              Persisted in localStorage &middot; Automatically updates live as new fixes arrive
+            </p>
+          </div>
 
           <div className="flex items-center gap-2">
             <button
               type="button"
-              onClick={() =>
-                setShowMap((v) => !v)
-              }
+              onClick={() => setShowMap((val) => !val)}
               className="btn btn-ghost btn-sm"
             >
-              <Icon
-                name="map"
-                size={14}
-              />
-
-              {showMap
-                ? 'Hide map'
-                : 'Show map'}
+              <Icon name="map" size={14} />
+              {showMap ? 'Hide Map' : 'Show Map'}
             </button>
 
-            <div className="flex items-center gap-1">
-              <button
-                type="button"
-                onClick={() =>
-                  setPage((p) =>
-                    Math.max(0, p - 1),
-                  )
-                }
-                disabled={page === 0}
-                className="btn btn-outline btn-sm"
-                aria-label="Previous page"
-              >
-                <Icon
-                  name="chevronLeft"
-                  size={14}
-                />
-              </button>
+            {pageCount > 1 ? (
+              <div className="flex items-center gap-1">
+                <button
+                  type="button"
+                  onClick={() => setPage((v) => Math.max(0, v - 1))}
+                  disabled={page === 0}
+                  className="btn btn-outline btn-sm"
+                  aria-label="Previous page"
+                >
+                  <Icon name="chevronLeft" size={14} />
+                </button>
 
-              <span className="px-2 font-mono text-xs text-slate-500 dark:text-slate-400">
-                {page + 1} / {pageCount}
-              </span>
+                <span className="px-2 font-mono text-xs text-slate-500 dark:text-slate-400">
+                  {page + 1} / {pageCount}
+                </span>
 
-              <button
-                type="button"
-                onClick={() =>
-                  setPage((p) =>
-                    Math.min(
-                      pageCount - 1,
-                      p + 1,
-                    ),
-                  )
-                }
-                disabled={
-                  page + 1 >= pageCount
-                }
-                className="btn btn-outline btn-sm"
-                aria-label="Next page"
-              >
-                <Icon
-                  name="chevronRight"
-                  size={14}
-                />
-              </button>
-            </div>
+                <button
+                  type="button"
+                  onClick={() => setPage((v) => Math.min(pageCount - 1, v + 1))}
+                  disabled={page + 1 >= pageCount}
+                  className="btn btn-outline btn-sm"
+                  aria-label="Next page"
+                >
+                  <Icon name="chevronRight" size={14} />
+                </button>
+              </div>
+            ) : null}
           </div>
         </div>
 
         {showMap ? (
           <div className="border-b border-slate-200 p-4 dark:border-slate-800">
             <MapView
-              marker={null}
+              marker={mapPath.length ? mapPath[mapPath.length - 1] : null}
               path={mapPath}
               autoFit
+              showPointMarkers
               className="h-[42vh]"
-              emptyMessage="No points in this range"
+              emptyMessage="No frontend GPS history recorded yet"
             />
           </div>
         ) : null}
 
-        {loading ? (
-          <div className="flex items-center justify-center py-16 text-slate-400">
-            <Spinner />
-          </div>
-        ) : rows.length === 0 ? (
+        {total === 0 ? (
           <EmptyState
             icon="history"
-            title="No locations in this range"
-            description="Try a wider date range, or wait for the ESP32 to post a new fix."
+            title="No frontend GPS points recorded yet"
+            description="Whenever a location fix is received from the ESP32 via realtime Socket.IO, it will automatically save and appear here."
           />
         ) : (
           <div className="overflow-x-auto">
             <table className="w-full min-w-[1100px] text-sm">
               <thead>
                 <tr className="border-b border-slate-200 text-left text-xs uppercase tracking-wide text-slate-500 dark:border-slate-800 dark:text-slate-400">
-                  <th className="px-4 py-3 font-semibold">
-                    Date
-                  </th>
-
-                  <th className="px-4 py-3 font-semibold">
-                    Time
-                  </th>
-
-                  <th className="px-4 py-3 font-semibold">
-                    Latitude
-                  </th>
-
-                  <th className="px-4 py-3 font-semibold">
-                    Longitude
-                  </th>
-
-                  <th className="px-4 py-3 font-semibold">
-                    Altitude
-                  </th>
-
-                  <th className="px-4 py-3 font-semibold">
-                    Satellites
-                  </th>
-
-                  <th className="px-4 py-3 font-semibold">
-                    GPS Fix
-                  </th>
-
-                  <th className="px-4 py-3 font-semibold">
-                    Accuracy
-                  </th>
-
-                  <th className="px-4 py-3 font-semibold">
-                    Speed
-                  </th>
-
-                  <th className="px-4 py-3 font-semibold">
-                    Heading
-                  </th>
-
-                  <th className="px-4 py-3 font-semibold">
-                    Wi-Fi
-                  </th>
-
-                  <th className="px-4 py-3 font-semibold">
-                    RSSI
-                  </th>
-
-                  <th className="px-4 py-3 font-semibold">
-                    GeoLinker
-                  </th>
-
-                  <th className="px-4 py-3 font-semibold">
-                    Render
-                  </th>
+                  <th className="px-4 py-3 font-semibold">Date</th>
+                  <th className="px-4 py-3 font-semibold">Time</th>
+                  <th className="px-4 py-3 font-semibold">Latitude</th>
+                  <th className="px-4 py-3 font-semibold">Longitude</th>
+                  <th className="px-4 py-3 font-semibold">Altitude</th>
+                  <th className="px-4 py-3 font-semibold">Satellites</th>
+                  <th className="px-4 py-3 font-semibold">GPS Fix</th>
+                  <th className="px-4 py-3 font-semibold">Accuracy</th>
+                  <th className="px-4 py-3 font-semibold">Speed</th>
+                  <th className="px-4 py-3 font-semibold">Heading</th>
+                  <th className="px-4 py-3 font-semibold">Wi-Fi</th>
+                  <th className="px-4 py-3 font-semibold">RSSI</th>
+                  <th className="px-4 py-3 font-semibold">GeoLinker</th>
+                  <th className="px-4 py-3 font-semibold">Render</th>
                 </tr>
               </thead>
 
               <tbody>
-                {rows.map((row) => (
-                  <tr
-                    key={row.id}
-                    className="table-row"
-                  >
+                {currentPageRows.map((row) => (
+                  <tr key={row.id} className="table-row">
                     <td className="px-4 py-2.5 text-slate-600 dark:text-slate-300">
-                      {formatDate(
-                        row.timestamp,
-                      )}
+                      {formatDate(row.timestamp)}
                     </td>
 
                     <td className="px-4 py-2.5 font-mono text-xs text-slate-500 dark:text-slate-400">
-                      {formatTime(
-                        row.timestamp,
-                      )}
+                      {formatTime(row.timestamp)}
                     </td>
 
                     <td className="px-4 py-2.5 font-mono text-xs text-slate-800 dark:text-slate-100">
-                      {formatCoord(
-                        row.latitude,
-                      )}
+                      {formatCoord(row.latitude)}
                     </td>
 
                     <td className="px-4 py-2.5 font-mono text-xs text-slate-800 dark:text-slate-100">
-                      {formatCoord(
-                        row.longitude,
-                      )}
+                      {formatCoord(row.longitude)}
                     </td>
 
                     <td className="px-4 py-2.5 font-mono text-xs text-slate-600 dark:text-slate-300">
                       {row.altitude != null
-                        ? `${Number(
-                            row.altitude,
-                          ).toFixed(1)} m`
+                        ? `${Number(row.altitude).toFixed(1)} m`
                         : '—'}
                     </td>
 
                     <td className="px-4 py-2.5">
                       <span className="chip bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-300">
-                        {row.satellites ??
-                          '—'}
+                        {row.satellites ?? '—'}
                       </span>
                     </td>
 
@@ -362,64 +347,50 @@ export default function History() {
                       <span
                         className={
                           row.gps_fix === true
-                            ? 'text-emerald-600 dark:text-emerald-400'
+                            ? 'text-emerald-600 dark:text-emerald-400 font-medium'
                             : row.gps_fix === false
-                              ? 'text-rose-600 dark:text-rose-400'
+                              ? 'text-rose-600 dark:text-rose-400 font-medium'
                               : 'text-slate-400'
                         }
                       >
-                        {formatBoolean(
-                          row.gps_fix,
-                        )}
+                        {formatBoolean(row.gps_fix)}
                       </span>
                     </td>
 
                     <td className="px-4 py-2.5 font-mono text-xs text-slate-600 dark:text-slate-300">
                       {row.accuracy != null
-                        ? `${Number(
-                            row.accuracy,
-                          ).toFixed(1)} m`
+                        ? `${Number(row.accuracy).toFixed(1)} m`
                         : '—'}
                     </td>
 
                     <td className="px-4 py-2.5 font-mono text-xs text-slate-600 dark:text-slate-300">
                       {row.speed != null
-                        ? Number(
-                            row.speed,
-                          ).toFixed(2)
+                        ? Number(row.speed).toFixed(2)
                         : '—'}
                     </td>
 
                     <td className="px-4 py-2.5 font-mono text-xs text-slate-600 dark:text-slate-300">
                       {row.heading != null
-                        ? `${Number(
-                            row.heading,
-                          ).toFixed(1)}°`
+                        ? `${Number(row.heading).toFixed(1)}°`
                         : '—'}
                     </td>
 
                     <td className="px-4 py-2.5">
-                      {formatBoolean(
-                        row.wifi_connected,
-                      )}
+                      {formatBoolean(row.wifi_connected)}
                     </td>
 
                     <td className="px-4 py-2.5 font-mono text-xs text-slate-600 dark:text-slate-300">
                       {row.wifi_rssi != null
-                        ? `${Number(
-                            row.wifi_rssi,
-                          )} dBm`
+                        ? `${Number(row.wifi_rssi)} dBm`
                         : '—'}
                     </td>
 
                     <td className="px-4 py-2.5 text-xs">
-                      {row.geolinker_status ??
-                        '—'}
+                      {row.geolinker_status ?? '—'}
                     </td>
 
                     <td className="px-4 py-2.5 text-xs">
-                      {row.render_status ??
-                        '—'}
+                      {row.render_status ?? '—'}
                     </td>
                   </tr>
                 ))}
@@ -430,8 +401,7 @@ export default function History() {
       </div>
 
       <p className="mt-3 text-center text-xs text-slate-400">
-        Timestamps are shown in your local timezone ·
-        stored as UTC
+        Timestamps are displayed in your local timezone &middot; Stored persistently in browser localStorage
       </p>
     </div>
   );

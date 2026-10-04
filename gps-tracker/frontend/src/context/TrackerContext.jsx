@@ -15,6 +15,27 @@ const DEFAULT_CONFIG = {
   dashboard_auth_required: false,
 };
 
+const FRONTEND_HISTORY_KEY = 'gps_tracker_frontend_history';
+
+function readFrontendHistoryFromStorage() {
+  try {
+    const data = localStorage.getItem(FRONTEND_HISTORY_KEY);
+    if (!data) return [];
+    const parsed = JSON.parse(data);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+function saveFrontendHistoryToStorage(history) {
+  try {
+    localStorage.setItem(FRONTEND_HISTORY_KEY, JSON.stringify(history));
+  } catch {
+    // Ignore storage quota errors
+  }
+}
+
 export function TrackerProvider({ children }) {
   const [config, setConfig] = useState(DEFAULT_CONFIG);
   const [device, setDevice] = useState(null);
@@ -23,19 +44,78 @@ export function TrackerProvider({ children }) {
   const [error, setError] = useState(null);
   const [loading, setLoading] = useState(true);
   const [lastEventAt, setLastEventAt] = useState(null);
+  const [frontendHistory, setFrontendHistory] = useState(() => readFrontendHistoryFromStorage());
 
   const socketRef = useRef(null);
   const now = useNow(1000);
+
+  const addFrontendPoint = useCallback((location) => {
+    if (!location) return;
+    const lat = Number(location.latitude);
+    const lng = Number(location.longitude);
+    if (!Number.isFinite(lat) || !Number.isFinite(lng) || (lat === 0 && lng === 0)) {
+      return;
+    }
+
+    const timestamp = location.timestamp || location.created_at || new Date().toISOString();
+    const id = location.id ?? `fe_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
+
+    const newPoint = {
+      id: String(id),
+      latitude: lat,
+      longitude: lng,
+      altitude: location.altitude != null ? Number(location.altitude) : null,
+      satellites: location.satellites != null ? Number(location.satellites) : null,
+      gps_fix: location.gps_fix ?? null,
+      accuracy: location.accuracy != null ? Number(location.accuracy) : null,
+      speed: location.speed != null ? Number(location.speed) : null,
+      heading: location.heading != null ? Number(location.heading) : null,
+      wifi_connected: location.wifi_connected ?? null,
+      wifi_rssi: location.wifi_rssi != null ? Number(location.wifi_rssi) : null,
+      geolinker_status: location.geolinker_status ?? null,
+      render_status: location.render_status ?? null,
+      timestamp,
+    };
+
+    setFrontendHistory((prev) => {
+      // Check for exact duplicate timestamp or last item identical coordinates + time
+      if (prev.length > 0) {
+        const last = prev[prev.length - 1];
+        if (
+          last.timestamp === newPoint.timestamp &&
+          last.latitude === newPoint.latitude &&
+          last.longitude === newPoint.longitude
+        ) {
+          return prev;
+        }
+      }
+      const updated = [...prev, newPoint];
+      saveFrontendHistoryToStorage(updated);
+      return updated;
+    });
+  }, []);
+
+  const clearFrontendHistory = useCallback(() => {
+    setFrontendHistory([]);
+    try {
+      localStorage.removeItem(FRONTEND_HISTORY_KEY);
+    } catch {
+      // Ignore
+    }
+  }, []);
 
   /** Re-read the device + most recent fix (used on boot, on reconnect and as a poll). */
   const refresh = useCallback(async () => {
     const [deviceRes, latestRes] = await Promise.all([api.getDevice(), api.getLatest()]);
     setDevice(deviceRes.device ?? null);
-    setLatest(latestRes.location ?? null);
+    if (latestRes.location) {
+      setLatest(latestRes.location);
+      addFrontendPoint(latestRes.location);
+    }
     setError(null);
     setLastEventAt(Date.now());
     return { device: deviceRes.device, location: latestRes.location };
-  }, []);
+  }, [addFrontendPoint]);
 
   // ---- boot: public config + first snapshot ---------------------------------
   useEffect(() => {
@@ -95,7 +175,10 @@ export function TrackerProvider({ children }) {
     });
 
     socket.on('location:new', ({ location, device: nextDevice }) => {
-      if (location) setLatest(location);
+      if (location) {
+        setLatest(location);
+        addFrontendPoint(location);
+      }
       if (nextDevice) setDevice(nextDevice);
       setConnection('live');
       setError(null);
@@ -112,7 +195,7 @@ export function TrackerProvider({ children }) {
       socket.close();
       socketRef.current = null;
     };
-  }, [refresh]);
+  }, [refresh, addFrontendPoint]);
 
   // ---- polling fallback (works even if WebSocket is blocked) ----------------
   useEffect(() => {
@@ -155,10 +238,26 @@ export function TrackerProvider({ children }) {
       loading,
       lastEventAt,
       refresh,
+      frontendHistory,
+      addFrontendPoint,
+      clearFrontendHistory,
       deviceId: device?.device_id ?? config.device_id,
       deviceName: device?.name ?? config.device_name,
     }),
-    [config, device, latest, status, connection, error, loading, lastEventAt, refresh],
+    [
+      config,
+      device,
+      latest,
+      status,
+      connection,
+      error,
+      loading,
+      lastEventAt,
+      refresh,
+      frontendHistory,
+      addFrontendPoint,
+      clearFrontendHistory,
+    ],
   );
 
   return <TrackerContext.Provider value={value}>{children}</TrackerContext.Provider>;
