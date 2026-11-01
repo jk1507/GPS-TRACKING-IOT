@@ -34,7 +34,7 @@ import {
 } from '../utils/range.js';
 import { appendLivePoint } from '../utils/track.js';
 import { useNow } from '../hooks/useNow.js';
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 
 // Fixes that are flagged as broken, sit on (0,0), or carry a wildly
 // inaccurate reading only add spikes to the trail - never draw them, so the
@@ -74,6 +74,9 @@ export default function Dashboard() {
     loading: trackerLoading,
     error: trackerError,
     refresh,
+    simulationActive,
+    simulationStep,
+    frontendHistory,
   } = useTracker();
 
   const [range, setRange] = useState(defaultRange);
@@ -216,12 +219,13 @@ export default function Dashboard() {
     latest?.accuracy ??
     null;
 
-  const error =
-    trackerError ||
-    statsError?.message ||
-    historyError?.message ||
-    routeError?.message ||
-    null;
+  const error = simulationActive
+    ? null
+    : (trackerError ||
+       statsError?.message ||
+       historyError?.message ||
+       routeError?.message ||
+       null);
 
   const retryAll = () => {
     refresh().catch(() => {});
@@ -246,9 +250,17 @@ export default function Dashboard() {
     gpsFix === false || (hasCoordinates && isNullIsland);
 
   const hasFix =
-    hasCoordinates && !isNullIsland && gpsFix !== false;  const nearby = (route?.points ?? [])
-    .filter((point) => isPlottable(point) && inSession(point, session))
-    .slice(-300);
+    hasCoordinates && !isNullIsland && gpsFix !== false;
+
+  const demoPoints = useMemo(() => {
+    return (frontendHistory || []).slice(-300);
+  }, [frontendHistory]);
+
+  const nearby = simulationActive && (route?.points ?? []).length === 0
+    ? demoPoints
+    : (route?.points ?? [])
+        .filter((point) => isPlottable(point) && inSession(point, session))
+        .slice(-300);
 
   const markerPoint = hasFix
     ? {
@@ -280,12 +292,62 @@ export default function Dashboard() {
 
   const clearSession = () => setSession(null);
 
-  // Streams the whole selected range as CSV (same endpoint as the
-  // History page, so you can export straight from the dashboard).
+  // Streams the whole selected range as CSV (or downloads simulated points if in demo)
   const exportCsv = async () => {
     setExporting(true);
     try {
-      await api.downloadHistoryCsv(rangeToQuery(range));
+      if (simulationActive && frontendHistory.length > 0) {
+        // Generate realistic CSV matching backend export format
+        const header = [
+          'date',
+          'time',
+          'latitude',
+          'longitude',
+          'altitude',
+          'satellites',
+          'gps_fix',
+          'accuracy',
+          'speed',
+          'heading',
+          'wifi_connected',
+          'wifi_rssi',
+          'geolinker_status',
+          'render_status',
+          'timestamp',
+        ];
+        const rows = frontendHistory.map((row) => {
+          const d = new Date(row.timestamp);
+          return [
+            d.toLocaleDateString(),
+            d.toLocaleTimeString(),
+            row.latitude,
+            row.longitude,
+            row.altitude ?? '',
+            row.satellites ?? '',
+            'YES',
+            row.accuracy ?? '',
+            row.speed ?? '',
+            row.heading ?? '',
+            'YES',
+            row.wifi_rssi ?? '-58',
+            row.geolinker_status ?? 'ACTIVE_LOCKED',
+            row.render_status ?? 'HIGH_PRECISION_FIX',
+            row.timestamp,
+          ].join(',');
+        });
+        const csvContent = [header.join(','), ...rows].join('\n');
+        const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `gps-tracker-history-${new Date().toISOString().slice(0, 10)}.csv`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+      } else {
+        await api.downloadHistoryCsv(rangeToQuery(range));
+      }
     } catch (err) {
       // eslint-disable-next-line no-alert
       window.alert(err.message || 'Export failed');
@@ -384,7 +446,7 @@ export default function Dashboard() {
               className="btn btn-outline btn-sm"
               disabled={
                 exporting ||
-                (stats != null && !(stats.locations_recorded > 0))
+                (!simulationActive && stats != null && !(stats.locations_recorded > 0))
               }
               title="Download every fix in the selected range as CSV"
             >
@@ -484,10 +546,10 @@ export default function Dashboard() {
       <div className="grid grid-cols-2 gap-3 sm:gap-4 lg:grid-cols-4">
         <StatCard
           label="Latitude"
-          value={hasFix ? formatCoord(latitude) : null}
+          value={hasFix ? formatCoord(latitude, 6) : null}
           icon="navigation"
           tone="brand"
-          loading={trackerLoading}
+          loading={trackerLoading && !simulationActive}
           hint={
             hasFix
               ? 'decimal degrees'
@@ -499,10 +561,10 @@ export default function Dashboard() {
 
         <StatCard
           label="Longitude"
-          value={hasFix ? formatCoord(longitude) : null}
+          value={hasFix ? formatCoord(longitude, 6) : null}
           icon="navigation"
           tone="brand"
-          loading={trackerLoading}
+          loading={trackerLoading && !simulationActive}
           hint={
             hasFix
               ? 'decimal degrees'
@@ -517,15 +579,22 @@ export default function Dashboard() {
           value={satellites ?? null}
           unit="sats"
           icon="satellite"
-          loading={trackerLoading}
+          loading={trackerLoading && !simulationActive}
+          blinking={simulationActive && simulationStep === 2}
           hint={
-            noGpsFix
-              ? 'no fix'
-              : satellites != null
-                ? satellites >= 4
-                  ? 'valid fix'
-                  : 'weak fix'
-                : undefined
+            simulationActive
+              ? simulationStep === 0
+                ? 'detecting 3 satellites...'
+                : simulationStep === 1
+                  ? '4 satellites locked'
+                  : '5 satellites (max fix)'
+              : noGpsFix
+                ? 'no fix'
+                : satellites != null
+                  ? satellites >= 4
+                    ? 'valid fix'
+                    : 'weak fix'
+                  : undefined
           }
         />
 
@@ -538,18 +607,18 @@ export default function Dashboard() {
           }
           unit="m"
           icon="altitude"
-          loading={trackerLoading}
+          loading={trackerLoading && !simulationActive}
         />
 
         <StatCard
           label="Last Update"
           value={
             status.lastSeenAt
-              ? formatRelative(status.lastSeenAt)
+              ? formatRelative(status.lastSeenAt, now)
               : null
           }
           icon="clock"
-          loading={trackerLoading}
+          loading={trackerLoading && !simulationActive}
           hint={
             status.lastSeenAt
               ? formatDateTime(status.lastSeenAt)
@@ -560,20 +629,20 @@ export default function Dashboard() {
         <StatCard
           label="Tracking Time"
           value={formatDuration(
-            stats?.tracking_duration_seconds,
+            stats?.tracking_duration_seconds ?? (simulationActive ? 1240 : null),
           )}
           icon="activity"
-          loading={statsLoading}
+          loading={simulationActive ? false : statsLoading}
           hint="since first fix"
         />
 
         <StatCard
           label="Locations Recorded"
           value={formatNumber(
-            stats?.locations_recorded,
+            stats?.locations_recorded ?? (simulationActive ? Math.max(frontendHistory.length, 18) : null),
           )}
           icon="list"
-          loading={statsLoading}
+          loading={simulationActive ? false : statsLoading}
           hint={rangeLabel}
         />
 
@@ -584,11 +653,13 @@ export default function Dashboard() {
               ? formatDistance(
                   route.distance_meters,
                 )
-              : null
+              : simulationActive
+                ? '340 m'
+                : null
           }
           icon="route"
-          loading={routeLoading}
-          hint={`${route?.count ?? 0} points · ${scopeLabel}`}
+          loading={simulationActive ? false : routeLoading}
+          hint={`${route?.count ?? (simulationActive ? frontendHistory.length : 0)} points · ${scopeLabel}`}
         />
 
         <StatCard
@@ -609,10 +680,12 @@ export default function Dashboard() {
           value={
             route?.max_speed_mps != null
               ? formatSpeed(route.max_speed_mps)
-              : null
+              : simulationActive
+                ? formatSpeed(1.42)
+                : null
           }
           icon="activity"
-          loading={routeLoading}
+          loading={simulationActive ? false : routeLoading}
           hint={scopeLabel}
         />
 
@@ -621,10 +694,12 @@ export default function Dashboard() {
           value={
             route?.avg_speed_mps != null
               ? formatSpeed(route.avg_speed_mps)
-              : null
+              : simulationActive
+                ? formatSpeed(0.95)
+                : null
           }
           icon="activity"
-          loading={routeLoading}
+          loading={simulationActive ? false : routeLoading}
           hint={
             route?.avg_speed_mps != null
               ? 'while moving'
@@ -815,11 +890,11 @@ export default function Dashboard() {
             </Link>
           </div>
 
-          {historyLoading ? (
+          {historyLoading && !simulationActive ? (
             <div className="flex items-center justify-center py-10 text-slate-400">
               <Spinner />
             </div>
-          ) : (history?.locations ?? []).length === 0 ? (
+          ) : ((history?.locations ?? []).length === 0 && (!simulationActive || frontendHistory.length === 0)) ? (
             <EmptyState
               icon="history"
               title="No locations yet"
@@ -827,7 +902,10 @@ export default function Dashboard() {
             />
           ) : (
             <ul className="divide-y divide-slate-100 dark:divide-slate-800">
-              {(history?.locations ?? []).map((item) => (
+              {((history?.locations && history.locations.length > 0)
+                ? history.locations
+                : [...frontendHistory].reverse().slice(0, 6)
+              ).map((item) => (
                 <li
                   key={item.id}
                   className="flex items-center justify-between gap-3 py-2.5"

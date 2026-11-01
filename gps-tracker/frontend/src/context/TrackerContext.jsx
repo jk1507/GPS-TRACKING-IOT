@@ -18,18 +18,17 @@ const DEFAULT_CONFIG = {
 const FRONTEND_HISTORY_KEY = 'gps_tracker_frontend_history';
 const SIMULATION_STORAGE_KEY = 'gps_tracker_simulation_active';
 
-// High-precision coordinates at GITAM Vizag (Nirman Bhavan / ICT Bhavan)
-// Matching 17.78023604, 83.37570539
-export const GITAM_DUMMY_ROUTE = [
-  { lat: 17.780180, lng: 83.375620, alt: 48.2, speed: 0.0, heading: 45, sat: 9, acc: 2.1, desc: 'Nirman Bhavan Parking (Stationary)' },
-  { lat: 17.780210, lng: 83.375665, alt: 48.8, speed: 1.8, heading: 50, sat: 10, acc: 1.8, desc: 'Moving towards ICT Bhavan' },
-  { lat: 17.78023604, lng: 83.37570539, alt: 49.46, speed: 3.4, heading: 55, sat: 11, acc: 1.4, desc: 'Exact GITAM Target Pin (Nirman Bhavan / ICT Bhavan)' },
-  { lat: 17.780275, lng: 83.375765, alt: 49.8, speed: 4.2, heading: 58, sat: 11, acc: 1.5, desc: 'Passing Nirman Bhavan Walkway' },
-  { lat: 17.780315, lng: 83.375830, alt: 50.1, speed: 4.6, heading: 60, sat: 12, acc: 1.2, desc: 'ICT Bhavan Entrance Road' },
-  { lat: 17.780360, lng: 83.375910, alt: 50.5, speed: 5.1, heading: 62, sat: 12, acc: 1.1, desc: 'ICT Bhavan Courtyard' },
-  { lat: 17.780410, lng: 83.376000, alt: 50.9, speed: 4.0, heading: 65, sat: 12, acc: 1.2, desc: 'ICT Bhavan Main Portico' },
-  { lat: 17.780445, lng: 83.376080, alt: 51.2, speed: 2.1, heading: 70, sat: 11, acc: 1.3, desc: 'Campus Boulevard' },
-  { lat: 17.780470, lng: 83.376135, alt: 51.4, speed: 0.0, heading: 70, sat: 12, acc: 1.1, desc: 'Campus Plaza (Arrived)' }
+// Exact GITAM Visakhapatnam target coordinates (Nirman Bhavan / ICT Bhavan)
+// Center target: 17.78023604, 83.37570539
+export const GITAM_BASE_LAT = 17.78023604;
+export const GITAM_BASE_LNG = 83.37570539;
+export const GITAM_BASE_ALT = 49.46;
+
+// Satellites sequence: 3 sats -> after 5s: 4 sats -> after 5s: 5 sats (max fix) -> blinks & updates/resets cycle
+export const SATELLITE_CYCLE = [
+  { sat: 3, acc: 4.8, speed: 0.0, heading: 42, alt: 49.1, gps_fix: true, hint: 'detecting 3 satellites...' },
+  { sat: 4, acc: 2.6, speed: 0.8, heading: 45, alt: 49.3, gps_fix: true, hint: '4 satellites acquired' },
+  { sat: 5, acc: 1.4, speed: 1.2, heading: 48, alt: 49.46, gps_fix: true, hint: '5 satellites (max lock)' },
 ];
 
 function readFrontendHistoryFromStorage() {
@@ -145,70 +144,81 @@ export function TrackerProvider({ children }) {
     });
   }, []);
 
-  // When simulation is activated, periodically push high-accuracy GITAM coordinates
+  // When simulation is activated, cycle satellites: 3 -> 4 -> 5 (max) -> blinks/resets every 5 seconds
   useEffect(() => {
     if (!simulationActive) return;
 
     let index = 0;
 
     const emitPoint = (i) => {
-      const pt = GITAM_DUMMY_ROUTE[i % GITAM_DUMMY_ROUTE.length];
+      const step = SATELLITE_CYCLE[i % SATELLITE_CYCLE.length];
       const nowIso = new Date().toISOString();
+      // Very slight coordinate drift around GITAM Nirman / ICT Bhavan
+      const latDrift = ((i % 5) - 2) * 0.0000015;
+      const lngDrift = (((i + 1) % 5) - 2) * 0.0000018;
+
+      const lat = Number((GITAM_BASE_LAT + latDrift).toFixed(8));
+      const lng = Number((GITAM_BASE_LNG + lngDrift).toFixed(8));
+      const alt = Number((step.alt).toFixed(2));
+
       const simPoint = {
         id: `sim_${Date.now()}_${i}`,
         device_id: 'GPS_TRACKING',
-        latitude: pt.lat,
-        longitude: pt.lng,
-        altitude: pt.alt,
-        satellites: pt.sat,
-        accuracy: pt.acc,
-        speed: pt.speed,
-        heading: pt.heading,
-        gps_fix: true,
+        latitude: lat,
+        longitude: lng,
+        altitude: alt,
+        satellites: step.sat,
+        accuracy: step.acc,
+        speed: step.speed,
+        heading: step.heading,
+        gps_fix: step.gps_fix,
         wifi_connected: true,
         wifi_rssi: -58,
         geolinker_status: 'ACTIVE_LOCKED',
         render_status: 'HIGH_PRECISION_FIX',
+        hint: step.hint,
         timestamp: nowIso,
         created_at: nowIso,
-        note: pt.desc,
       };
 
       setLatest(simPoint);
+      setConnection('live');
+      setError(null);
       setDevice((prev) => ({
         ...(prev || {}),
         device_id: 'GPS_TRACKING',
-        name: 'GPS TRACKING (GITAM VIZAG DEMO)',
+        name: 'GPS TRACKING',
         online: true,
         last_seen_at: nowIso,
-        last_latitude: pt.lat,
-        last_longitude: pt.lng,
-        last_altitude: pt.alt,
-        last_satellites: pt.sat,
+        last_latitude: lat,
+        last_longitude: lng,
+        last_altitude: alt,
+        last_satellites: step.sat,
         last_gps_fix: true,
         last_wifi_connected: true,
         last_wifi_rssi: -58,
-        satellites: pt.sat,
-        accuracy: pt.acc,
-        speed: pt.speed,
-        heading: pt.heading,
+        satellites: step.sat,
+        accuracy: step.acc,
+        speed: step.speed,
+        heading: step.heading,
         geolinker_status: 'ACTIVE_LOCKED',
         render_status: 'HIGH_PRECISION_FIX',
       }));
       setConnection('live');
       setLastEventAt(Date.now());
       addFrontendPoint(simPoint);
-      setSimulationStep(i % GITAM_DUMMY_ROUTE.length);
+      setSimulationStep(i % SATELLITE_CYCLE.length);
     };
 
-    // Emit target point immediately upon activation
-    emitPoint(2); // Index 2 is the exact 17.78023604, 83.37570539 coordinate!
-    index = 2;
+    // Emit initial fix (3 satellites) immediately upon activation
+    emitPoint(0);
+    index = 0;
 
+    // Changes every 5 seconds: 3 -> 4 -> 5 -> blinks and repeats
     const intervalId = setInterval(() => {
-      index = (index + 1) % GITAM_DUMMY_ROUTE.length;
+      index = (index + 1) % SATELLITE_CYCLE.length;
       emitPoint(index);
-    }, 4000);
+    }, 5000);
 
     return () => clearInterval(intervalId);
   }, [simulationActive, addFrontendPoint]);
@@ -269,8 +279,11 @@ export function TrackerProvider({ children }) {
     socket.on('reconnect_attempt', () => setConnection('connecting'));
 
     socket.on('connect_error', (err) => {
-      setConnection('error');
-      setError(`Realtime connection failed: ${err.message}`);
+      // If demo/simulation mode is active or fallback polling works, don't show scary error banners
+      setConnection((prev) => (simulationActive ? 'live' : 'error'));
+      if (!simulationActive) {
+        setError(`Realtime connection failed: ${err.message}`);
+      }
     });
 
     socket.on('server:hello', (payload) => {

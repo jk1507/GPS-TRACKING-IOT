@@ -210,8 +210,10 @@ export default function MapView({
 
   const centerOnDevice = () => {
     const map = mapRef.current;
-    if (!map || !markerPosition) return;
-    map.flyTo(markerPosition, Math.max(map.getZoom(), zoom), { duration: 0.8 });
+    if (!map) return;
+    // Centers precisely on 17.78023604, 83.37570539 (GITAM Nirman / ICT Bhavan)
+    const target = markerPosition || [17.78023604, 83.37570539];
+    map.flyTo(target, Math.max(map.getZoom(), 19), { duration: 0.8 });
   };
 
   const fitRoute = () => {

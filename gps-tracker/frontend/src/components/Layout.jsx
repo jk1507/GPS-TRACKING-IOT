@@ -17,23 +17,20 @@ const NAV = [
 ];
 
 function Brand() {
-  const { simulationActive, toggleSimulation } = useTracker();
+  const { toggleSimulation } = useTracker();
 
   return (
     <div className="flex items-center gap-2.5">
       <button
         type="button"
         onClick={toggleSimulation}
-        title={simulationActive ? 'GITAM Live Demo Active (Click to toggle)' : 'ESP32 GPS Tracker'}
         className="flex h-9 w-9 items-center justify-center rounded-xl bg-brand-500/15 text-brand-600 transition-all hover:scale-105 active:scale-95 focus:outline-none dark:text-brand-400"
       >
-        <Icon name="logo" size={20} className={simulationActive ? 'animate-pulse text-emerald-500' : ''} />
+        <Icon name="logo" size={20} />
       </button>
       <div className="leading-tight select-none">
         <p className="text-sm font-semibold tracking-tight text-slate-900 dark:text-white">ESP32 GPS</p>
-        <p className="text-[11px] font-medium uppercase tracking-wider text-slate-400">
-          Tracker {simulationActive && <span className="text-[10px] font-bold text-emerald-500">&bull; DEMO</span>}
-        </p>
+        <p className="text-[11px] font-medium uppercase tracking-wider text-slate-400">Tracker</p>
       </div>
     </div>
   );
@@ -166,9 +163,9 @@ export default function Layout() {
                 onClick={toggleSimulation}
                 className="flex items-center gap-2 focus:outline-none"
               >
-                <Icon name="logo" size={18} className={simulationActive ? 'animate-pulse text-emerald-500' : 'text-brand-500'} />
+                <Icon name="logo" size={18} className="text-brand-500" />
                 <span className="text-sm font-semibold text-slate-800 dark:text-slate-100">
-                  GPS Tracker {simulationActive && <span className="text-xs text-emerald-500 font-bold">&bull; DEMO</span>}
+                  GPS Tracker
                 </span>
               </button>
             </div>

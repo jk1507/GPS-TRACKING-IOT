@@ -57,21 +57,21 @@ const TONES = {
   warning: 'text-amber-600 dark:text-amber-400',
 };
 
-export function StatCard({ label, value, unit, hint, icon, tone = 'default', loading = false }) {
+export function StatCard({ label, value, unit, hint, icon, tone = 'default', loading = false, blinking = false }) {
   return (
-    <div className="card card-hover p-4 transition-shadow animate-fade-in-up">
+    <div className={`card card-hover p-4 transition-all duration-300 animate-fade-in-up ${blinking ? 'ring-2 ring-brand-500 shadow-brand-500/20 shadow-lg' : ''}`}>
       <div className="flex items-start justify-between gap-3">
         <span className="text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">
           {label}
         </span>
         {icon ? (
-          <span className="flex h-8 w-8 items-center justify-center rounded-lg bg-slate-100 text-slate-500 dark:bg-slate-800 dark:text-slate-400">
+          <span className={`flex h-8 w-8 items-center justify-center rounded-lg bg-slate-100 text-slate-500 dark:bg-slate-800 dark:text-slate-400 ${blinking ? 'animate-bounce text-brand-500' : ''}`}>
             <Icon name={icon} size={16} />
           </span>
         ) : null}
       </div>
 
-      <div className={`mt-2 flex items-baseline gap-1 font-mono text-2xl font-semibold tabular-nums ${TONES[tone]}`}>
+      <div className={`mt-2 flex items-baseline gap-1 font-mono text-2xl font-semibold tabular-nums transition-opacity duration-300 ${TONES[tone]} ${blinking ? 'animate-pulse text-brand-500' : ''}`}>
         {loading ? <span className="text-slate-400">...</span> : value ?? '\u2014'}
         {unit && !loading ? <span className="text-sm font-medium text-slate-400">{unit}</span> : null}
       </div>
