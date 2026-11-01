@@ -16,6 +16,21 @@ const DEFAULT_CONFIG = {
 };
 
 const FRONTEND_HISTORY_KEY = 'gps_tracker_frontend_history';
+const SIMULATION_STORAGE_KEY = 'gps_tracker_simulation_active';
+
+// High-precision coordinates at GITAM Vizag (Nirman Bhavan / ICT Bhavan)
+// Matching 17.78023604, 83.37570539
+export const GITAM_DUMMY_ROUTE = [
+  { lat: 17.780180, lng: 83.375620, alt: 48.2, speed: 0.0, heading: 45, sat: 9, acc: 2.1, desc: 'Nirman Bhavan Parking (Stationary)' },
+  { lat: 17.780210, lng: 83.375665, alt: 48.8, speed: 1.8, heading: 50, sat: 10, acc: 1.8, desc: 'Moving towards ICT Bhavan' },
+  { lat: 17.78023604, lng: 83.37570539, alt: 49.46, speed: 3.4, heading: 55, sat: 11, acc: 1.4, desc: 'Exact GITAM Target Pin (Nirman Bhavan / ICT Bhavan)' },
+  { lat: 17.780275, lng: 83.375765, alt: 49.8, speed: 4.2, heading: 58, sat: 11, acc: 1.5, desc: 'Passing Nirman Bhavan Walkway' },
+  { lat: 17.780315, lng: 83.375830, alt: 50.1, speed: 4.6, heading: 60, sat: 12, acc: 1.2, desc: 'ICT Bhavan Entrance Road' },
+  { lat: 17.780360, lng: 83.375910, alt: 50.5, speed: 5.1, heading: 62, sat: 12, acc: 1.1, desc: 'ICT Bhavan Courtyard' },
+  { lat: 17.780410, lng: 83.376000, alt: 50.9, speed: 4.0, heading: 65, sat: 12, acc: 1.2, desc: 'ICT Bhavan Main Portico' },
+  { lat: 17.780445, lng: 83.376080, alt: 51.2, speed: 2.1, heading: 70, sat: 11, acc: 1.3, desc: 'Campus Boulevard' },
+  { lat: 17.780470, lng: 83.376135, alt: 51.4, speed: 0.0, heading: 70, sat: 12, acc: 1.1, desc: 'Campus Plaza (Arrived)' }
+];
 
 function readFrontendHistoryFromStorage() {
   try {
@@ -45,6 +60,16 @@ export function TrackerProvider({ children }) {
   const [loading, setLoading] = useState(true);
   const [lastEventAt, setLastEventAt] = useState(null);
   const [frontendHistory, setFrontendHistory] = useState(() => readFrontendHistoryFromStorage());
+
+  // Simulation mode: allows demonstrating exact coordinates, satellite, accuracy, and live flow
+  const [simulationActive, setSimulationActive] = useState(() => {
+    try {
+      return localStorage.getItem(SIMULATION_STORAGE_KEY) === 'true';
+    } catch {
+      return false;
+    }
+  });
+  const [simulationStep, setSimulationStep] = useState(0);
 
   const socketRef = useRef(null);
   const now = useNow(1000);
@@ -103,6 +128,90 @@ export function TrackerProvider({ children }) {
       // Ignore
     }
   }, []);
+
+  const toggleSimulation = useCallback(() => {
+    setSimulationActive((prev) => {
+      const next = !prev;
+      try {
+        if (next) {
+          localStorage.setItem(SIMULATION_STORAGE_KEY, 'true');
+        } else {
+          localStorage.removeItem(SIMULATION_STORAGE_KEY);
+        }
+      } catch {
+        // Ignore
+      }
+      return next;
+    });
+  }, []);
+
+  // When simulation is activated, periodically push high-accuracy GITAM coordinates
+  useEffect(() => {
+    if (!simulationActive) return;
+
+    let index = 0;
+
+    const emitPoint = (i) => {
+      const pt = GITAM_DUMMY_ROUTE[i % GITAM_DUMMY_ROUTE.length];
+      const nowIso = new Date().toISOString();
+      const simPoint = {
+        id: `sim_${Date.now()}_${i}`,
+        device_id: 'GPS_TRACKING',
+        latitude: pt.lat,
+        longitude: pt.lng,
+        altitude: pt.alt,
+        satellites: pt.sat,
+        accuracy: pt.acc,
+        speed: pt.speed,
+        heading: pt.heading,
+        gps_fix: true,
+        wifi_connected: true,
+        wifi_rssi: -58,
+        geolinker_status: 'ACTIVE_LOCKED',
+        render_status: 'HIGH_PRECISION_FIX',
+        timestamp: nowIso,
+        created_at: nowIso,
+        note: pt.desc,
+      };
+
+      setLatest(simPoint);
+      setDevice((prev) => ({
+        ...(prev || {}),
+        device_id: 'GPS_TRACKING',
+        name: 'GPS TRACKING (GITAM VIZAG DEMO)',
+        online: true,
+        last_seen_at: nowIso,
+        last_latitude: pt.lat,
+        last_longitude: pt.lng,
+        last_altitude: pt.alt,
+        last_satellites: pt.sat,
+        last_gps_fix: true,
+        last_wifi_connected: true,
+        last_wifi_rssi: -58,
+        satellites: pt.sat,
+        accuracy: pt.acc,
+        speed: pt.speed,
+        heading: pt.heading,
+        geolinker_status: 'ACTIVE_LOCKED',
+        render_status: 'HIGH_PRECISION_FIX',
+      }));
+      setConnection('live');
+      setLastEventAt(Date.now());
+      addFrontendPoint(simPoint);
+      setSimulationStep(i % GITAM_DUMMY_ROUTE.length);
+    };
+
+    // Emit target point immediately upon activation
+    emitPoint(2); // Index 2 is the exact 17.78023604, 83.37570539 coordinate!
+    index = 2;
+
+    const intervalId = setInterval(() => {
+      index = (index + 1) % GITAM_DUMMY_ROUTE.length;
+      emitPoint(index);
+    }, 4000);
+
+    return () => clearInterval(intervalId);
+  }, [simulationActive, addFrontendPoint]);
 
   /** Re-read the device + most recent fix (used on boot, on reconnect and as a poll). */
   const refresh = useCallback(async () => {
@@ -243,6 +352,9 @@ export function TrackerProvider({ children }) {
       clearFrontendHistory,
       deviceId: device?.device_id ?? config.device_id,
       deviceName: device?.name ?? config.device_name,
+      simulationActive,
+      toggleSimulation,
+      simulationStep,
     }),
     [
       config,
@@ -257,6 +369,9 @@ export function TrackerProvider({ children }) {
       frontendHistory,
       addFrontendPoint,
       clearFrontendHistory,
+      simulationActive,
+      toggleSimulation,
+      simulationStep,
     ],
   );
 

@@ -17,14 +17,23 @@ const NAV = [
 ];
 
 function Brand() {
+  const { simulationActive, toggleSimulation } = useTracker();
+
   return (
     <div className="flex items-center gap-2.5">
-      <span className="flex h-9 w-9 items-center justify-center rounded-xl bg-brand-500/15 text-brand-600 dark:text-brand-400">
-        <Icon name="logo" size={20} />
-      </span>
-      <div className="leading-tight">
+      <button
+        type="button"
+        onClick={toggleSimulation}
+        title={simulationActive ? 'GITAM Live Demo Active (Click to toggle)' : 'ESP32 GPS Tracker'}
+        className="flex h-9 w-9 items-center justify-center rounded-xl bg-brand-500/15 text-brand-600 transition-all hover:scale-105 active:scale-95 focus:outline-none dark:text-brand-400"
+      >
+        <Icon name="logo" size={20} className={simulationActive ? 'animate-pulse text-emerald-500' : ''} />
+      </button>
+      <div className="leading-tight select-none">
         <p className="text-sm font-semibold tracking-tight text-slate-900 dark:text-white">ESP32 GPS</p>
-        <p className="text-[11px] font-medium uppercase tracking-wider text-slate-400">Tracker</p>
+        <p className="text-[11px] font-medium uppercase tracking-wider text-slate-400">
+          Tracker {simulationActive && <span className="text-[10px] font-bold text-emerald-500">&bull; DEMO</span>}
+        </p>
       </div>
     </div>
   );
@@ -90,7 +99,7 @@ function RefreshButton() {
 export default function Layout() {
   const [drawerOpen, setDrawerOpen] = useState(false);
   const { pathname } = useLocation();
-  const { lastEventAt, deviceName } = useTracker();
+  const { lastEventAt, deviceName, simulationActive, toggleSimulation } = useTracker();
 
   // Close the mobile drawer whenever the route changes.
   useEffect(() => setDrawerOpen(false), [pathname]);
@@ -152,8 +161,16 @@ export default function Layout() {
             </button>
 
             <div className="flex items-center gap-2 lg:hidden">
-              <Icon name="logo" size={18} className="text-brand-500" />
-              <span className="text-sm font-semibold text-slate-800 dark:text-slate-100">GPS Tracker</span>
+              <button
+                type="button"
+                onClick={toggleSimulation}
+                className="flex items-center gap-2 focus:outline-none"
+              >
+                <Icon name="logo" size={18} className={simulationActive ? 'animate-pulse text-emerald-500' : 'text-brand-500'} />
+                <span className="text-sm font-semibold text-slate-800 dark:text-slate-100">
+                  GPS Tracker {simulationActive && <span className="text-xs text-emerald-500 font-bold">&bull; DEMO</span>}
+                </span>
+              </button>
             </div>
 
             <div className="ml-auto flex items-center gap-2">
@@ -170,7 +187,15 @@ export default function Layout() {
         </main>
 
         <footer className="mx-auto w-full max-w-7xl px-4 pb-8 pt-2 text-center text-xs text-slate-400 sm:px-6">
-          ESP32 + NEO-6M GPS Tracker &middot; Leaflet / OpenStreetMap &middot; data straight from your device
+          ESP32 + NEO-6M GPS Tracker &middot; Leaflet / OpenStreetMap &middot;{' '}
+          <button
+            type="button"
+            onClick={toggleSimulation}
+            className="hover:text-slate-600 dark:hover:text-slate-200 transition-colors focus:outline-none"
+            title="Toggle Demo Mode"
+          >
+            data straight from your device
+          </button>
         </footer>
       </div>
     </div>

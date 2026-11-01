@@ -1,429 +1,1321 @@
-/* ==========================================================================
-   ESP32 GPS Tracker  -  NEO-6M  ->  REST backend
-   --------------------------------------------------------------------------
-   Hardware
-     ESP32 DevKit V1 / ESP32-WROOM-32
-     NEO-6M  TX  -> ESP32 GPIO16  (ESP32 UART RX)
-     NEO-6M  RX  -> ESP32 GPIO17  (ESP32 UART TX)
-     NEO-6M  GND -> ESP32 GND
-     NEO-6M  VCC -> ESP32 3V3      (do NOT power it from 5V)
-     Onboard LED -> GPIO2
+/*
+   ============================================================
+                 ESP32 GPS TRACKER
+                 NEO-6M + GeoLinker
+   ============================================================
 
-   Behaviour
-     - Reads NMEA sentences from the NEO-6M on UART1 (9600 baud)
-     - Parses $GxGGA (fix, satellites, altitude, HDOP) and $GxRMC
-       (date/time, ground speed, course)
-     - POSTs a JSON fix every 10 s, but only with a valid fix, non-zero
-       coordinates and at least 4 satellites
-     - Retries failed uploads and reconnects Wi-Fi automatically
-     - LED: OFF = no Wi-Fi | SOLID = Wi-Fi, no fix | BLINKING = Wi-Fi + fix
+   BOARD:
+   ESP32 DevKit V1 / ESP32-WROOM-32
 
-   Before flashing
-     1. Copy secrets.h.example to secrets.h and fill it in.
-     2. Select board "ESP32 Dev Module" and the correct COM port.
-   ========================================================================== */
+   GPS:
+   NEO-6M
+
+   GPS WIRING:
+   NEO-6M TX  -> ESP32 GPIO 16
+   NEO-6M RX  -> ESP32 GPIO 17
+   NEO-6M GND -> ESP32 GND
+   NEO-6M VCC -> ESP32 appropriate VCC
+
+   ONBOARD LED:
+   GPIO 2
+
+   LED STATUS:
+   OFF       -> WiFi disconnected
+   SOLID ON  -> WiFi connected, GPS invalid
+   BLINKING  -> WiFi connected, GPS valid
+   ============================================================
+*/
+
+
+// ============================================================
+// LIBRARIES
+// ============================================================
 
 #include <WiFi.h>
 #include <HTTPClient.h>
-#include <math.h>
+#include <WiFiClientSecure.h>
+#include <CircuitDigestCloud.h>
+#include <vector>
 
-#include "secrets.h"
+// ============================================================
+// WIFI
+// ============================================================
 
-// --------------------------------------------------------------------------
-// Configuration
-// --------------------------------------------------------------------------
-static const int RXPin = 16;   // ESP32 RX  <- NEO-6M TX
-static const int TXPin = 17;   // ESP32 TX  -> NEO-6M RX
-static const int LED_PIN = 2;
-static const bool LED_ACTIVE_HIGH = true;
+const char* ssid = "JACK";
+const char* password = "12344321";
 
-static const uint32_t GPS_BAUD = 9600;
-static const uint32_t SERIAL_BAUD = 115200;
-static const uint32_t SEND_INTERVAL_MS = 10000;   // upload every 10 seconds
-static const uint32_t WIFI_RETRY_MS = 10000;
-static const uint32_t LED_BLINK_MS = 500;
-static const uint32_t HTTP_TIMEOUT_MS = 8000;
-static const int MIN_SATELLITES = 4;
-static const int MAX_UPLOAD_ATTEMPTS = 3;
 
-// --------------------------------------------------------------------------
-// State
-// --------------------------------------------------------------------------
+// ============================================================
+// CIRCUITDIGEST GEOLINKER
+// ============================================================
+
+const char* serverUrl =
+    "https://www.circuitdigest.cloud/api/v1/geolinker";
+
+const char* apiKey =
+    "cd_boy_300926_UREknq";
+
+// This name must match the tracker/device name
+// you want to see in GeoLinker.
+const char* deviceID = "Gsp";
+
+
+// ============================================================
+// YOUR RENDER BACKEND
+// ============================================================
+
+const char* renderUrl =
+    "https://gps-tracking-iot.onrender.com/api/location";
+
+const char* renderApiSecret =
+    "c5f036fa5c6189b047628801d30d6e09";
+
+
+// ============================================================
+// GPS UART
+// ============================================================
+
 HardwareSerial gpsSerial(1);
 
-struct GpsData {
-  bool hasFix = false;         // seen a valid GGA + RMC
-  double latitude = 0.0;       // decimal degrees
-  double longitude = 0.0;      // decimal degrees
-  double altitude = 0.0;       // metres
+// NEO-6M TX -> ESP32 RX
+const int RXPin = 16;
+
+// NEO-6M RX -> ESP32 TX
+const int TXPin = 17;
+
+
+// ============================================================
+// ONBOARD LED
+// ============================================================
+
+const int onboardLED = 2;
+
+
+
+// ============================================================
+// GPS RAW DATA
+// ============================================================
+
+struct GPSRawData {
+
+  double latitude = 0.0;
+  char latitudeDir = 'N';
+
+  double longitude = 0.0;
+  char longitudeDir = 'E';
+
   int satellites = 0;
-  double speedKnots = -1.0;    // RMC ground speed (knots); -1 = unknown
-  double course = -1.0;        // RMC track angle (degrees true); -1 = unknown
-  double hdop = -1.0;          // GGA HDOP; -1 = unknown
-  char utcTime[12] = "";       // "hhmmss.sss"
-  char utcDate[8] = "";        // "ddmmyy"
-  uint32_t lastFixMs = 0;
+
+  double altitude = 0.0;
+
+  int hours = 0;
+  int minutes = 0;
+  int seconds = 0;
+
+  int day = 0;
+  int month = 0;
+  int year = 0;
+
+  String timestamp = "";
 };
 
-GpsData gps;
 
-char nmeaBuffer[128];
-uint8_t nmeaIndex = 0;
+// ============================================================
+// GPS DATA FOR SERVER
+// ============================================================
 
-uint32_t lastSendMs = 0;
-uint32_t lastWifiAttemptMs = 0;
-uint32_t lastBlinkMs = 0;
-bool blinkState = false;
+struct GPSData {
 
-bool uploadPending = false;    // a fix is waiting for a successful upload
-String pendingPayload = "";
+  double latitude = 0.0;
+  double longitude = 0.0;
 
-// --------------------------------------------------------------------------
-// NMEA helpers
-// --------------------------------------------------------------------------
+  String timestamp = "";
+};
 
-/** "4807.038" + 'N'  ->  48.117300 */
-double nmeaToDegrees(const char *value, char hemisphere) {
-  if (value == nullptr || value[0] == '\0') return 0.0;
 
-  double raw = atof(value);
-  int degrees = (int)(raw / 100.0);
-  double minutes = raw - (degrees * 100.0);
-  double decimal = degrees + (minutes / 60.0);
+// ============================================================
+// GLOBAL VARIABLES
+// ============================================================
 
-  if (hemisphere == 'S' || hemisphere == 'W') decimal = -decimal;
-  return decimal;
-}
+GPSRawData latestGPSRawData;
 
-/** Split a comma separated NMEA line into fields (in place). */
-int splitNmea(char *line, char *fields[], int maxFields) {
-  int count = 0;
-  char *cursor = line;
-  while (count < maxFields) {
-    fields[count++] = cursor;
-    char *comma = strchr(cursor, ',');
-    if (comma == nullptr) break;
-    *comma = '\0';
-    cursor = comma + 1;
-  }
-  return count;
-}
+GPSData latestGPSData;
 
-/** XOR checksum between '$' and '*'. */
-bool checksumValid(const char *line) {
-  if (line[0] != '$') return false;
-  const char *star = strchr(line, '*');
-  if (star == nullptr) return false;
+String geolinkerStatus = "unknown";
+String lastRenderStatus = "unknown";
 
-  uint8_t checksum = 0;
-  for (const char *p = line + 1; p < star; ++p) checksum ^= (uint8_t)(*p);
+// GPS validity
+bool gpsDataValid = false;
 
-  uint8_t expected = (uint8_t)strtol(star + 1, nullptr, 16);
-  return checksum == expected;
-}
 
-/** $GxGGA - position fix, satellites, altitude. */
-void parseGga(char *fields[], int count) {
-  if (count < 10) return;
+// Upload every 10 seconds
+const unsigned long uploadInterval = 10000;
 
-  // fields[6] = fix quality (0 = invalid)
-  if (fields[6][0] == '0' || fields[6][0] == '\0') {
-    gps.hasFix = false;
-    return;
-  }
+unsigned long lastUploadTime = 0;
 
-  double lat = nmeaToDegrees(fields[2], fields[3][0]);
-  double lon = nmeaToDegrees(fields[4], fields[5][0]);
-  if (lat == 0.0 && lon == 0.0) {
-    gps.hasFix = false;
-    return;
-  }
 
-  gps.latitude = lat;
-  gps.longitude = lon;
-  gps.satellites = atoi(fields[7]);
-  if (count > 8 && fields[8][0] != '\0') gps.hdop = atof(fields[8]);
-  gps.altitude = atof(fields[9]);
-  strncpy(gps.utcTime, fields[1], sizeof(gps.utcTime) - 1);
-  gps.lastFixMs = millis();
-  gps.hasFix = true;
-}
+// Store data when WiFi/server is unavailable
+std::vector<GPSData> offlineData;
 
-/** $GxRMC - date + validity flag (needed to build the timestamp). */
-void parseRmc(char *fields[], int count) {
-  if (count < 10) return;
 
-  if (fields[2][0] != 'A') {   // 'A' = active/valid, 'V' = void
-    gps.hasFix = false;
-    return;
-  }
-  strncpy(gps.utcDate, fields[9], sizeof(gps.utcDate) - 1);
+// ============================================================
+// LED VARIABLES
+// ============================================================
 
-  // RMC also carries ground speed (knots) and track angle (degrees true).
-  if (count > 7 && fields[7][0] != '\0') gps.speedKnots = atof(fields[7]);
-  if (count > 8 && fields[8][0] != '\0') gps.course = atof(fields[8]);
-}
+unsigned long lastLEDBlink = 0;
 
-void handleNmeaLine(char *line) {
-  if (!checksumValid(line)) return;
+bool ledState = false;
 
-  char *star = strchr(line, '*');
-  if (star != nullptr) *star = '\0';
+const unsigned long blinkInterval = 500;
 
-  char *fields[24];
-  int count = splitNmea(line + 1, fields, 24);  // skip the leading '$'
-  if (count == 0) return;
 
-  const char *sentence = fields[0];            // e.g. "GPGGA", "GNRMC"
-  if (strlen(sentence) < 5) return;
+// ============================================================
+// SETUP
+// ============================================================
 
-  const char *type = sentence + 2;             // skip the talker ID
-  if (strcmp(type, "GGA") == 0) {
-    parseGga(fields, count);
-  } else if (strcmp(type, "RMC") == 0) {
-    parseRmc(fields, count);
-  }
-}
+void setup() {
 
-/** Drain whatever the GPS module has buffered. Never blocks. */
-void readGps() {
-  while (gpsSerial.available() > 0) {
-    char c = (char)gpsSerial.read();
+  // ----------------------------------------------------------
+  // SERIAL MONITOR
+  // ----------------------------------------------------------
 
-    if (c == '\n' || c == '\r') {
-      if (nmeaIndex > 0) {
-        nmeaBuffer[nmeaIndex] = '\0';
-        handleNmeaLine(nmeaBuffer);
-        nmeaIndex = 0;
-      }
-      continue;
-    }
+  Serial.begin(115200);
 
-    if (nmeaIndex < sizeof(nmeaBuffer) - 1) {
-      nmeaBuffer[nmeaIndex++] = c;
-    } else {
-      nmeaIndex = 0;   // overflow: drop the malformed line
-    }
-  }
-}
+  delay(1000);
 
-// --------------------------------------------------------------------------
-// LED
-// --------------------------------------------------------------------------
-void updateLed() {
-  bool wifiUp = (WiFi.status() == WL_CONNECTED);
-  bool hasFix = (gps.hasFix && gps.satellites >= MIN_SATELLITES);
+  Serial.println();
+  Serial.println("======================================");
+  Serial.println("       ESP32 GPS TRACKER");
+  Serial.println("======================================");
 
-  if (!wifiUp) {
-    // OFF: no Wi-Fi
-    digitalWrite(LED_PIN, LED_ACTIVE_HIGH ? LOW : HIGH);
-    return;
-  }
 
-  if (!hasFix) {
-    // SOLID: Wi-Fi connected, waiting for a GPS fix
-    digitalWrite(LED_PIN, LED_ACTIVE_HIGH ? HIGH : LOW);
-    return;
-  }
+  // ----------------------------------------------------------
+  // GPS SERIAL
+  // ----------------------------------------------------------
 
-  // BLINKING: Wi-Fi connected and a valid fix is available
-  if (millis() - lastBlinkMs >= LED_BLINK_MS) {
-    lastBlinkMs = millis();
-    blinkState = !blinkState;
-  }
-  bool level = LED_ACTIVE_HIGH ? blinkState : !blinkState;
-  digitalWrite(LED_PIN, level ? HIGH : LOW);
-}
+  gpsSerial.begin(
+    9600,
+    SERIAL_8N1,
+    RXPin,
+    TXPin
+  );
 
-// --------------------------------------------------------------------------
-// Wi-Fi
-// --------------------------------------------------------------------------
-void ensureWifi() {
-  if (WiFi.status() == WL_CONNECTED) return;
-  if (millis() - lastWifiAttemptMs < WIFI_RETRY_MS) return;
+  Serial.println("GPS Serial Started");
+  Serial.println("GPS RX = GPIO16");
+  Serial.println("GPS TX = GPIO17");
 
-  lastWifiAttemptMs = millis();
-  Serial.print("[wifi] connecting to ");
-  Serial.println(WIFI_SSID);
+
+  // ----------------------------------------------------------
+  // LED
+  // ----------------------------------------------------------
+
+  pinMode(onboardLED, OUTPUT);
+
+  digitalWrite(onboardLED, LOW);
+
+
+  // ----------------------------------------------------------
+  // WIFI
+  // ----------------------------------------------------------
+
+  Serial.println();
+  Serial.println("Connecting to WiFi...");
 
   WiFi.mode(WIFI_STA);
-  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
 
-  uint32_t started = millis();
-  while (WiFi.status() != WL_CONNECTED && millis() - started < 8000) {
-    readGps();     // keep parsing NMEA while we wait
-    updateLed();
-    delay(20);
+  WiFi.begin(ssid, password);
+
+
+  while (WiFi.status() != WL_CONNECTED) {
+
+    digitalWrite(onboardLED, LOW);
+
+    delay(500);
+
+    Serial.print(".");
   }
+
+
+  Serial.println();
+  Serial.println("--------------------------------------");
+  Serial.println("WiFi connected!");
+  Serial.println("--------------------------------------");
+
+  Serial.print("IP Address: ");
+  Serial.println(WiFi.localIP());
+
+  Serial.print("Device ID: ");
+  Serial.println(deviceID);
+
+  Serial.println("--------------------------------------");
+
+
+  updateLED();
+}
+
+
+// ============================================================
+// MAIN LOOP
+// ============================================================
+
+void loop() {
+
+  static String gpsData = "";
+
+
+  // ==========================================================
+  // READ GPS DATA
+  // ==========================================================
+
+  while (gpsSerial.available()) {
+
+    char c = gpsSerial.read();
+
+    gpsData += c;
+
+
+    if (c == '\n') {
+
+      processGPSData(gpsData);
+
+      gpsData = "";
+    }
+  }
+
+
+  // ==========================================================
+  // UPDATE LED
+  // ==========================================================
+
+  updateLED();
+
+
+  // ==========================================================
+  // UPLOAD EVERY 10 SECONDS
+  // ==========================================================
+
+  if (millis() - lastUploadTime >= uploadInterval) {
+
+    lastUploadTime = millis();
+
+
+    // --------------------------------------------------------
+    // GPS INVALID
+    // --------------------------------------------------------
+
+    if (!gpsDataValid) {
+
+  Serial.println();
+  Serial.println("--------------------------------------");
+  Serial.println("GPS fix not available.");
+  Serial.println("Sending telemetry to Render...");
+  Serial.println("--------------------------------------");
 
   if (WiFi.status() == WL_CONNECTED) {
-    Serial.print("[wifi] connected, IP ");
-    Serial.println(WiFi.localIP());
-  } else {
-    Serial.println("[wifi] not connected yet - will retry");
+
+    sendGPSDataToRender(latestGPSData);
+
   }
 }
 
-// --------------------------------------------------------------------------
-// Upload
-// --------------------------------------------------------------------------
 
-/** Build the ISO-8601 timestamp the backend expects (UTC). */
-String buildTimestamp() {
-  if (strlen(gps.utcDate) != 6 || strlen(gps.utcTime) < 6) return "";
+    // --------------------------------------------------------
+    // GPS VALID
+    // --------------------------------------------------------
 
-  char day[3] = {gps.utcDate[0], gps.utcDate[1], '\0'};
-  char month[3] = {gps.utcDate[2], gps.utcDate[3], '\0'};
-  char year[5] = {'2', '0', gps.utcDate[4], gps.utcDate[5], '\0'};
+    else {
 
-  char hh[3] = {gps.utcTime[0], gps.utcTime[1], '\0'};
-  char mm[3] = {gps.utcTime[2], gps.utcTime[3], '\0'};
-  char ss[3] = {gps.utcTime[4], gps.utcTime[5], '\0'};
+      // ======================================================
+      // WIFI CONNECTED
+      // ======================================================
 
-  char stamp[32];
-  snprintf(stamp, sizeof(stamp), "%s-%s-%sT%s:%s:%s", year, month, day, hh, mm, ss);
-  return String(stamp);
+      if (WiFi.status() == WL_CONNECTED) {
+
+        Serial.println();
+        Serial.println("======================================");
+        Serial.println("GPS FIX VALID");
+        Serial.println("======================================");
+
+
+        Serial.print("Satellites: ");
+        Serial.println(latestGPSRawData.satellites);
+
+        Serial.print("Latitude: ");
+        Serial.println(latestGPSData.latitude, 6);
+
+        Serial.print("Longitude: ");
+        Serial.println(latestGPSData.longitude, 6);
+
+        Serial.print("Timestamp: ");
+        Serial.println(latestGPSData.timestamp);
+
+
+        // ----------------------------------------------------
+        // SEND OLD OFFLINE DATA FIRST
+        // ----------------------------------------------------
+
+        // if (!offlineData.empty()) {
+
+        //   Serial.println();
+        //   Serial.println("Uploading stored offline data...");
+
+        //   bool offlineUploadSuccess = true;
+
+
+        //   for (auto& data : offlineData) {
+
+        //     if (!sendGPSData(data)) {
+
+        //       offlineUploadSuccess = false;
+
+        //       Serial.println(
+        //         "Failed to upload stored data."
+        //       );
+
+        //       break;
+        //     }
+        //   }
+
+
+        //   if (offlineUploadSuccess) {
+
+        //     offlineData.clear();
+
+        //     Serial.println(
+        //       "All offline data uploaded."
+        //     );
+        //   }
+        // }
+
+
+        // ----------------------------------------------------
+        // SEND CURRENT GPS DATA
+        // ----------------------------------------------------
+
+        bool geoSuccess = sendGPSData(latestGPSData);
+
+geolinkerStatus = geoSuccess ? "success" : "failed";
+
+if (geoSuccess) {
+
+  Serial.println();
+  Serial.println(
+    "Latest GPS data uploaded successfully!"
+  );
+
+}
+else {
+
+  Serial.println();
+  Serial.println(
+    "Failed to upload latest GPS data."
+  );
+
+  Serial.println(
+    "Storing GPS data locally."
+  );
+
+  offlineData.push_back(latestGPSData);
+
 }
 
-String buildPayload() {
-  String payload = "{";
-  payload += "\"device_id\":\"" DEVICE_ID "\",";
-  payload += "\"latitude\":" + String(gps.latitude, 6) + ",";
-  payload += "\"longitude\":" + String(gps.longitude, 6) + ",";
-  payload += "\"altitude\":" + String(gps.altitude, 1) + ",";
-  payload += "\"satellites\":" + String(gps.satellites) + ",";
+    
+             // ----------------------------------------------------
+        // SEND CURRENT GPS DATA TO RENDER
+        // ----------------------------------------------------
 
-  // Ground speed (m/s), heading (degrees) and a rough accuracy estimate
-  // (HDOP x ~5 m for the NEO-6M). The backend already validates and stores
-  // all three - the dashboard uses them for the live speed card.
-  if (gps.speedKnots >= 0.0) {
-    payload += "\"speed\":" + String(gps.speedKnots * 0.514444, 2) + ",";
-  }
-  if (gps.course >= 0.0) {
-    payload += "\"heading\":" + String(gps.course, 1) + ",";
-  }
-  if (gps.hdop > 0.0) {
-    payload += "\"accuracy\":" + String(gps.hdop * 5.0, 1) + ",";
-  }
+        bool renderSuccess =
+          sendGPSDataToRender(latestGPSData);
 
-  String stamp = buildTimestamp();
-  if (stamp.length() > 0) {
-    payload += "\"timestamp\":\"" + stamp + "\"";
-  } else {
-    payload += "\"timestamp\":\"" + String(millis()) + "\"";
+        if (renderSuccess) {
+
+          Serial.println();
+          Serial.println("Render upload successful!");
+
+        }
+        else {
+
+          Serial.println();
+          Serial.println("Render upload failed!");
+
+        }
+
+      }
+
+      // ======================================================
+      // WIFI DISCONNECTED
+      // ======================================================
+
+      else {
+
+        Serial.println();
+        Serial.println("--------------------------------------");
+        Serial.println("WiFi disconnected.");
+        Serial.println("Storing GPS data locally.");
+        Serial.println("--------------------------------------");
+
+
+        offlineData.push_back(latestGPSData);
+
+
+        // Try reconnecting
+        WiFi.disconnect();
+
+        delay(100);
+
+        WiFi.begin(ssid, password);
+      }
+    }
   }
-  payload += "}";
-  return payload;
 }
 
-/** POST one fix. Returns true on a 2xx response. */
-bool uploadLocation(const String &payload) {
-  if (WiFi.status() != WL_CONNECTED) return false;
 
-  String url = String(API_BASE_URL) + "/api/location";
+// ============================================================
+// LED CONTROL
+// ============================================================
 
-  WiFiClient client;
+void updateLED() {
+
+  // ==========================================================
+  // WIFI DISCONNECTED
+  // ==========================================================
+
+  if (WiFi.status() != WL_CONNECTED) {
+
+    digitalWrite(onboardLED, LOW);
+
+    ledState = false;
+
+    return;
+  }
+
+
+  // ==========================================================
+  // WIFI CONNECTED BUT GPS INVALID
+  // ==========================================================
+
+  if (!gpsDataValid) {
+
+    digitalWrite(onboardLED, HIGH);
+
+    return;
+  }
+
+
+  // ==========================================================
+  // WIFI CONNECTED + GPS VALID
+  // ==========================================================
+
+  if (millis() - lastLEDBlink >= blinkInterval) {
+
+    lastLEDBlink = millis();
+
+    ledState = !ledState;
+
+    digitalWrite(
+      onboardLED,
+      ledState
+    );
+  }
+}
+
+
+// ============================================================
+// SEND GPS DATA TO GEOLINKER
+// ============================================================
+
+bool sendGPSData(GPSData data) {
+
   HTTPClient http;
-  http.setTimeout(HTTP_TIMEOUT_MS);
 
-  if (!http.begin(client, url)) {
-    Serial.println("[http] begin() failed");
-    return false;
-  }
 
-  http.addHeader("Content-Type", "application/json");
-  http.addHeader("Authorization", String("Bearer ") + API_SECRET);
+  Serial.println();
+  Serial.println("======================================");
+  Serial.println("Sending GPS data to GeoLinker...");
+  Serial.println("======================================");
 
-  int status = http.POST(payload);
-  String body = http.getString();
+
+  // ----------------------------------------------------------
+  // CONNECT TO SERVER
+  // ----------------------------------------------------------
+
+  http.begin(serverUrl);
+
+
+  // ----------------------------------------------------------
+  // HTTP HEADERS
+  // ----------------------------------------------------------
+
+  http.addHeader(
+    "Content-Type",
+    "application/json"
+  );
+
+
+  // IMPORTANT:
+  // GeoLinker requires Bearer authentication
+
+  http.addHeader(
+    "Authorization",
+    "Bearer " + String(apiKey)
+  );
+
+
+  // ----------------------------------------------------------
+  // CREATE JSON
+  // ----------------------------------------------------------
+
+  String payload = "{";
+
+
+  // DEVICE ID
+
+  payload += "\"device_id\":\"";
+  payload += deviceID;
+  payload += "\",";
+
+
+  // TIMESTAMP
+
+  payload += "\"timestamp\":[\"";
+  payload += data.timestamp;
+  payload += "\"],";
+
+
+  // LATITUDE
+
+  payload += "\"lat\":[";
+  payload += String(data.latitude, 6);
+  payload += "],";
+
+
+  // LONGITUDE
+
+  payload += "\"long\":[";
+  payload += String(data.longitude, 6);
+  payload += "]";
+
+
+  payload += "}";
+
+
+  // ----------------------------------------------------------
+  // PRINT PAYLOAD
+  // ----------------------------------------------------------
+
+  Serial.println();
+  Serial.println("JSON Payload:");
+  Serial.println(payload);
+
+  Serial.println();
+
+
+  // ----------------------------------------------------------
+  // SEND POST REQUEST
+  // ----------------------------------------------------------
+
+  int httpResponseCode = http.POST(payload);
+
+
+  // ----------------------------------------------------------
+  // RESPONSE CODE
+  // ----------------------------------------------------------
+
+  Serial.print(
+    "GeoLinker HTTP Response Code: "
+  );
+
+  Serial.println(httpResponseCode);
+
+
+  // ----------------------------------------------------------
+  // RESPONSE BODY
+  // ----------------------------------------------------------
+
+  String response = http.getString();
+
+  Serial.println("GeoLinker Response:");
+
+  Serial.println(response);
+
+
+  // ----------------------------------------------------------
+  // CLOSE CONNECTION
+  // ----------------------------------------------------------
+
   http.end();
 
-  if (status >= 200 && status < 300) {
-    Serial.printf("[http] %d ok - %s\n", status, body.c_str());
+
+  // ----------------------------------------------------------
+  // CHECK RESULT
+  // ----------------------------------------------------------
+
+  if (
+    httpResponseCode == 200 ||
+    httpResponseCode == 201
+  ) {
+
+    Serial.println();
+    Serial.println("SUCCESS: GPS data accepted by server.");
+
     return true;
   }
 
-  Serial.printf("[http] upload failed (%d) - %s\n", status, body.c_str());
+
+  // ----------------------------------------------------------
+  // ERROR INFORMATION
+  // ----------------------------------------------------------
+
+  if (httpResponseCode == 400) {
+
+    Serial.println(
+      "ERROR 400: Bad request / JSON problem."
+    );
+  }
+
+  else if (httpResponseCode == 401) {
+
+    Serial.println(
+      "ERROR 401: API key/authentication problem."
+    );
+  }
+
+  else if (httpResponseCode == 403) {
+
+    Serial.println(
+      "ERROR 403: Access denied."
+    );
+  }
+
+  else if (httpResponseCode == -1) {
+
+    Serial.println(
+      "ERROR -1: Could not connect to server."
+    );
+  }
+
+
   return false;
 }
 
-/** Send the current fix, retrying a few times before leaving it pending. */
-void sendCurrentFix() {
-  String payload = buildPayload();
+// ============================================================
+// SEND GPS DATA TO RENDER BACKEND
+// ============================================================
 
-  for (int attempt = 1; attempt <= MAX_UPLOAD_ATTEMPTS; attempt++) {
-    if (uploadLocation(payload)) {
-      uploadPending = false;
-      pendingPayload = "";
-      return;
-    }
-    Serial.printf("[http] retry %d/%d\n", attempt, MAX_UPLOAD_ATTEMPTS);
-    delay(400);
-  }
+bool sendGPSDataToRender(GPSData data) {
 
-  // Keep it and try again on the next loop, so a brief outage never loses data.
-  uploadPending = true;
-  pendingPayload = payload;
-  Serial.println("[http] upload deferred to next cycle");
-}
+  WiFiClientSecure client;
+  client.setInsecure();
 
-// --------------------------------------------------------------------------
-// Arduino entry points
-// --------------------------------------------------------------------------
-void setup() {
-  Serial.begin(SERIAL_BAUD);
-  delay(300);
+  HTTPClient http;
+
   Serial.println();
-  Serial.println("=== ESP32 GPS Tracker ===");
+  Serial.println("======================================");
+  Serial.println("Sending GPS data to Render...");
+  Serial.println("======================================");
 
-  pinMode(LED_PIN, OUTPUT);
-  digitalWrite(LED_PIN, LED_ACTIVE_HIGH ? LOW : HIGH);
+  if (!http.begin(client, renderUrl)) {
+    Serial.println("ERROR: Could not connect to Render.");
+    return false;
+  }
 
-  gpsSerial.begin(GPS_BAUD, SERIAL_8N1, RXPin, TXPin);
-  Serial.printf("[gps] NEO-6M on UART1 RX=%d TX=%d @ %u baud\n", RXPin, TXPin, GPS_BAUD);
+  // Headers
+  http.addHeader("Content-Type", "application/json");
 
-  WiFi.mode(WIFI_STA);
-  WiFi.setAutoReconnect(true);
-  ensureWifi();
+  http.addHeader(
+    "Authorization",
+    "Bearer " + String(renderApiSecret)
+  );
 
-  lastSendMs = millis();
+  // JSON payload expected by your backend
+  String payload = "{";
+
+
+payload += "\"device_id\":\"";
+payload += deviceID;
+payload += "\",";
+
+payload += "\"latitude\":";
+payload += String(data.latitude, 6);
+payload += ",";
+
+payload += "\"longitude\":";
+payload += String(data.longitude, 6);
+payload += ",";
+
+payload += "\"altitude\":";
+payload += String(latestGPSRawData.altitude, 2);
+payload += ",";
+
+payload += "\"satellites\":";
+payload += String(latestGPSRawData.satellites);
+payload += ",";
+
+payload += "\"gps_fix\":";
+payload += (gpsDataValid ? "true" : "false");
+payload += ",";
+
+payload += "\"wifi_connected\":true,";
+
+payload += "\"wifi_rssi\":";
+payload += String(WiFi.RSSI());
+payload += ",";
+
+payload += "\"geolinker_status\":\"";
+payload += geolinkerStatus;
+payload += "\",";
+
+payload += "\"render_status\":\"";
+payload += lastRenderStatus;
+payload += "\",";
+
+payload += "\"timestamp\":\"";
+payload += data.timestamp;
+payload += "\"";
+
+payload += "}";
+
+  Serial.println();
+  Serial.println("Render JSON Payload:");
+  Serial.println(payload);
+
+  // POST
+  int httpResponseCode = http.POST(payload);
+
+  Serial.print("Render HTTP Response Code: ");
+  Serial.println(httpResponseCode);
+
+  String response = http.getString();
+
+  Serial.println("Render Response:");
+  Serial.println(response);
+
+  http.end();
+
+  if (httpResponseCode >= 200 && httpResponseCode < 300) {
+
+  Serial.println("SUCCESS: GPS data accepted by Render.");
+
+  lastRenderStatus = "success";
+
+  return true;
 }
 
-void loop() {
-  // Always read the GPS, even while the Wi-Fi is down.
-  readGps();
-  ensureWifi();
-  updateLed();
+Serial.println("ERROR: Render rejected GPS data.");
 
-  // Retry a deferred upload as soon as we have a connection again.
-  if (uploadPending && WiFi.status() == WL_CONNECTED) {
-    Serial.println("[http] retrying deferred upload");
-    if (uploadLocation(pendingPayload)) {
-      uploadPending = false;
-      pendingPayload = "";
+lastRenderStatus = "failed";
+
+return false;
+}
+
+
+// ============================================================
+// PROCESS GPS NMEA DATA
+// ============================================================
+
+void processGPSData(String raw) {
+
+  // Remove carriage return/newline
+  raw.trim();
+
+
+  // ----------------------------------------------------------
+  // GPGGA
+  // ----------------------------------------------------------
+
+  if (raw.startsWith("$GPGGA")) {
+
+    parseGPGGA(raw);
+  }
+
+
+  // ----------------------------------------------------------
+  // GPRMC
+  // ----------------------------------------------------------
+
+  else if (raw.startsWith("$GPRMC")) {
+
+    parseGPRMC(raw);
+  }
+}
+
+
+// ============================================================
+// PARSE GPGGA
+// ============================================================
+
+void parseGPGGA(String gpgga) {
+
+  String tokens[15];
+
+  int tokenIndex = 0;
+
+  int startIndex = 0;
+
+
+  // ----------------------------------------------------------
+  // SPLIT NMEA STRING
+  // ----------------------------------------------------------
+
+  for (int i = 0; i < gpgga.length(); i++) {
+
+    if (
+      gpgga[i] == ',' ||
+      gpgga[i] == '*'
+    ) {
+
+      if (tokenIndex < 15) {
+
+        tokens[tokenIndex++] =
+          gpgga.substring(
+            startIndex,
+            i
+          );
+      }
+
+      startIndex = i + 1;
     }
   }
 
-  uint32_t now = millis();
-  if (now - lastSendMs < SEND_INTERVAL_MS) return;
 
-  lastSendMs = now;
+  // ----------------------------------------------------------
+  // MAKE SURE DATA EXISTS
+  // ----------------------------------------------------------
 
-  const bool validFix = gps.hasFix && gps.latitude != 0.0 && gps.longitude != 0.0 &&
-                        gps.satellites >= MIN_SATELLITES;
+  if (tokenIndex <= 9) {
 
-  if (!validFix) {
-    Serial.printf("[gps] no fix yet (sats=%d, lat=%.6f, lon=%.6f)\n", gps.satellites, gps.latitude,
-                  gps.longitude);
     return;
   }
 
-  if (WiFi.status() != WL_CONNECTED) {
-    Serial.println("[wifi] offline - keeping the fix for the next cycle");
+
+  // ==========================================================
+  // UTC TIME
+  // ==========================================================
+
+  String utcTime = tokens[1];
+
+
+  if (utcTime.length() >= 6) {
+
+    latestGPSRawData.hours =
+      utcTime.substring(0, 2).toInt();
+
+    latestGPSRawData.minutes =
+      utcTime.substring(2, 4).toInt();
+
+    latestGPSRawData.seconds =
+      utcTime.substring(4, 6).toInt();
+  }
+
+
+  // ==========================================================
+  // LATITUDE
+  // ==========================================================
+
+  latestGPSRawData.latitude =
+    nmeaToDecimal(tokens[2]);
+
+  latestGPSData.latitude =
+    nmeaToDecimal(tokens[2]);
+
+
+  if (tokens[3].length() > 0) {
+
+    latestGPSRawData.latitudeDir =
+      tokens[3].charAt(0);
+  }
+
+
+  // ==========================================================
+  // LONGITUDE
+  // ==========================================================
+
+  latestGPSRawData.longitude =
+    nmeaToDecimal(tokens[4]);
+
+  latestGPSData.longitude =
+    nmeaToDecimal(tokens[4]);
+
+
+  if (tokens[5].length() > 0) {
+
+    latestGPSRawData.longitudeDir =
+      tokens[5].charAt(0);
+  }
+
+
+  // ==========================================================
+  // SATELLITES
+  // ==========================================================
+
+  latestGPSRawData.satellites =
+    tokens[7].toInt();
+
+
+  // ==========================================================
+  // ALTITUDE
+  // ==========================================================
+
+  latestGPSRawData.altitude =
+    tokens[9].toDouble();
+
+
+  // ==========================================================
+  // GPS VALIDITY
+  // ==========================================================
+
+  if (
+    latestGPSRawData.satellites >= 4 &&
+    (
+      latestGPSData.latitude != 0 ||
+      latestGPSData.longitude != 0
+    )
+  ) {
+
+    gpsDataValid = true;
+
+
+    Serial.println();
+    Serial.println("******** GPS FIX VALID ********");
+
+    Serial.print("Satellites: ");
+    Serial.println(
+      latestGPSRawData.satellites
+    );
+
+    Serial.print("Latitude: ");
+    Serial.println(
+      latestGPSData.latitude,
+      6
+    );
+
+    Serial.print("Longitude: ");
+    Serial.println(
+      latestGPSData.longitude,
+      6
+    );
+
+
+    updateTimestamp();
+  }
+
+  else {
+
+    gpsDataValid = false;
+
+    Serial.println();
+    Serial.println("GPS fix not available.");
+
+    Serial.print("Satellites: ");
+    Serial.println(
+      latestGPSRawData.satellites
+    );
+  }
+}
+
+
+// ============================================================
+// PARSE GPRMC
+// ============================================================
+
+void parseGPRMC(String gprmc) {
+
+  String tokens[15];
+
+  int tokenIndex = 0;
+
+  int startIndex = 0;
+
+
+  // ----------------------------------------------------------
+  // SPLIT NMEA STRING
+  // ----------------------------------------------------------
+
+  for (int i = 0; i < gprmc.length(); i++) {
+
+    if (
+      gprmc[i] == ',' ||
+      gprmc[i] == '*'
+    ) {
+
+      if (tokenIndex < 15) {
+
+        tokens[tokenIndex++] =
+          gprmc.substring(
+            startIndex,
+            i
+          );
+      }
+
+      startIndex = i + 1;
+    }
+  }
+
+
+  // ----------------------------------------------------------
+  // MAKE SURE DATE EXISTS
+  // ----------------------------------------------------------
+
+  if (tokenIndex <= 9) {
+
     return;
   }
 
-  Serial.printf("[gps] fix lat=%.6f lon=%.6f alt=%.1fm sats=%d\n", gps.latitude, gps.longitude,
-                gps.altitude, gps.satellites);
-  sendCurrentFix();
+
+  // ==========================================================
+  // RMC DATE
+  // ==========================================================
+
+  String utcDate = tokens[9];
+
+
+  if (utcDate.length() >= 6) {
+
+    latestGPSRawData.day =
+      utcDate.substring(0, 2).toInt();
+
+    latestGPSRawData.month =
+      utcDate.substring(2, 4).toInt();
+
+    latestGPSRawData.year =
+      2000 +
+      utcDate.substring(4, 6).toInt();
+
+
+    // Update timestamp once date is available
+    updateTimestamp();
+  }
+}
+
+
+// ============================================================
+// CREATE IST TIMESTAMP
+// ============================================================
+
+void updateTimestamp() {
+
+  // We need a valid date and time
+  if (
+    latestGPSRawData.year == 0 ||
+    latestGPSRawData.month == 0 ||
+    latestGPSRawData.day == 0
+  ) {
+
+    return;
+  }
+
+
+  // ----------------------------------------------------------
+  // Copy UTC time
+  // ----------------------------------------------------------
+
+  int localHours =
+    latestGPSRawData.hours;
+
+  int localMinutes =
+    latestGPSRawData.minutes;
+
+  int localSeconds =
+    latestGPSRawData.seconds;
+
+
+  int localDay =
+    latestGPSRawData.day;
+
+
+  int localMonth =
+    latestGPSRawData.month;
+
+
+  int localYear =
+    latestGPSRawData.year;
+
+
+  // ----------------------------------------------------------
+  // IST = UTC + 5 hours 30 minutes
+  // ----------------------------------------------------------
+
+  localMinutes += 30;
+
+  localHours += 5;
+
+
+  // ----------------------------------------------------------
+  // Handle minutes
+  // ----------------------------------------------------------
+
+  if (localMinutes >= 60) {
+
+    localMinutes -= 60;
+
+    localHours++;
+  }
+
+
+  // ----------------------------------------------------------
+  // Handle day rollover
+  // ----------------------------------------------------------
+
+  if (localHours >= 24) {
+
+    localHours -= 24;
+
+    localDay++;
+
+
+    // Simple month-day handling
+    int daysInMonth = 31;
+
+
+    if (
+      localMonth == 4 ||
+      localMonth == 6 ||
+      localMonth == 9 ||
+      localMonth == 11
+    ) {
+
+      daysInMonth = 30;
+    }
+
+    else if (localMonth == 2) {
+
+      bool leapYear =
+        (
+          (localYear % 4 == 0) &&
+          (
+            localYear % 100 != 0 ||
+            localYear % 400 == 0
+          )
+        );
+
+      daysInMonth =
+        leapYear ? 29 : 28;
+    }
+
+
+    if (localDay > daysInMonth) {
+
+      localDay = 1;
+
+      localMonth++;
+
+
+      if (localMonth > 12) {
+
+        localMonth = 1;
+
+        localYear++;
+      }
+    }
+  }
+
+
+  // ----------------------------------------------------------
+  // Create timestamp
+  // ----------------------------------------------------------
+
+  char timeBuffer[30];
+
+
+  snprintf(
+    timeBuffer,
+    sizeof(timeBuffer),
+
+    "%04d-%02d-%02d %02d:%02d:%02d",
+
+    localYear,
+    localMonth,
+    localDay,
+
+    localHours,
+    localMinutes,
+    localSeconds
+  );
+
+
+  latestGPSRawData.timestamp =
+    String(timeBuffer);
+
+
+  latestGPSData.timestamp =
+    String(timeBuffer);
+}
+
+
+// ============================================================
+// NMEA COORDINATE -> DECIMAL DEGREES
+// ============================================================
+
+double nmeaToDecimal(String nmeaCoord) {
+
+  if (nmeaCoord.length() == 0) {
+
+    return 0.0;
+  }
+
+
+  double raw =
+    nmeaCoord.toDouble();
+
+
+  int degrees =
+    int(raw / 100);
+
+
+  double minutes =
+    raw -
+    (degrees * 100);
+
+
+  return
+    degrees +
+    (minutes / 60.0);
+}
+
+
+// ============================================================
+// PRINT CURRENT GPS DATA
+// ============================================================
+
+void printLatestGPSData() {
+
+  Serial.println();
+  Serial.println("======================================");
+  Serial.println("CURRENT GPS DATA");
+  Serial.println("======================================");
+
+
+  Serial.print("Latitude: ");
+  Serial.println(
+    latestGPSData.latitude,
+    6
+  );
+
+
+  Serial.print("Longitude: ");
+  Serial.println(
+    latestGPSData.longitude,
+    6
+  );
+
+
+  Serial.print("Satellites: ");
+  Serial.println(
+    latestGPSRawData.satellites
+  );
+
+
+  Serial.print("Altitude: ");
+  Serial.println(
+    latestGPSRawData.altitude
+  );
+
+
+  Serial.print("Timestamp: ");
+  Serial.println(
+    latestGPSData.timestamp
+  );
+
+
+  Serial.println("======================================");
 }

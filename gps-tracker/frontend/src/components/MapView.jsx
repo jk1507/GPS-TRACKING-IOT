@@ -51,20 +51,17 @@ const TILES = {
   satellite: {
     label: 'Satellite',
     icon: 'satellite',
-    url: 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
-    attribution: 'Tiles &copy; Esri, Maxar, Earthstar Geographics',
-    maxZoom: 19,
+    url: 'https://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}',
+    attribution: 'Imagery &copy; Google Earth / Maxar Technologies',
+    maxZoom: 21,
     invertInDark: false,
   },
   hybrid: {
     label: 'Hybrid',
     icon: 'layers',
-    url: 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
-    overlay:
-      'https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}',
-    attribution:
-      'Imagery &copy; Esri, Maxar, Earthstar Geographics &middot; Labels &copy; Esri',
-    maxZoom: 19,
+    url: 'https://mt1.google.com/vt/lyrs=y&x={x}&y={y}&z={z}',
+    attribution: 'Imagery &copy; Google Maps / Earth &middot; Data &copy; Google',
+    maxZoom: 21,
     invertInDark: false,
   },
 };
@@ -166,7 +163,13 @@ export default function MapView({
   const lastFocusKey = useRef(null);
   const lastFollowPoint = useRef(null);
   const lastFitKey = useRef(null);
-  const [layer, setLayer] = useState('map');
+  const [layer, setLayer] = useState(() => {
+    try {
+      return localStorage.getItem('gps_tracker_preferred_layer') || 'satellite';
+    } catch {
+      return 'satellite';
+    }
+  });
   const [ready, setReady] = useState(false);
 
   const points = useMemo(
@@ -385,19 +388,43 @@ export default function MapView({
 
             <Marker position={markerPosition} icon={icon}>
               <Popup>
-                <div className="space-y-0.5">
-                  <p className="font-semibold text-slate-900 dark:text-white">
-                    {online ? 'Device online' : 'Device offline'}
-                  </p>
-                  <p>
-                    Lat: {formatCoord(marker.latitude)} <br />
-                    Lng: {formatCoord(marker.longitude)}
-                  </p>
-                  <p>
-                    Satellites: {marker.satellites ?? '\u2014'} &middot; Alt:{' '}
-                    {marker.altitude != null ? `${Number(marker.altitude).toFixed(1)} m` : '\u2014'}
-                  </p>
-                  <p className="text-slate-500">{formatDateTime(marker.timestamp)}</p>
+                <div className="space-y-1 min-w-[200px]">
+                  <div className="flex items-center justify-between gap-2 border-b border-slate-200 pb-1 dark:border-slate-700">
+                    <p className="font-semibold text-slate-900 dark:text-white">
+                      {online ? 'Device online' : 'Device offline'}
+                    </p>
+                    <span className="text-[10px] font-bold px-1.5 py-0.5 rounded bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300">
+                      FIX 3D
+                    </span>
+                  </div>
+                  <div className="text-xs space-y-0.5">
+                    <p className="font-mono text-[11px] text-slate-700 dark:text-slate-200">
+                      Lat: {Number(marker.latitude).toFixed(8)} <br />
+                      Lng: {Number(marker.longitude).toFixed(8)}
+                    </p>
+                    <p className="text-slate-600 dark:text-slate-300">
+                      Satellites: <strong className="text-brand-600 dark:text-brand-400">{marker.satellites ?? '\u2014'}</strong> &middot; Alt:{' '}
+                      <strong>{marker.altitude != null ? `${Number(marker.altitude).toFixed(1)} m` : '\u2014'}</strong>
+                    </p>
+                    {marker.accuracy != null && (
+                      <p className="text-slate-600 dark:text-slate-300">
+                        Accuracy: <strong className="text-emerald-600 dark:text-emerald-400">&plusmn;{Number(marker.accuracy).toFixed(1)} m</strong>
+                      </p>
+                    )}
+                    {marker.speed != null && (
+                      <p className="text-slate-600 dark:text-slate-300">
+                        Speed: {Number(marker.speed).toFixed(1)} km/h &middot; Heading: {marker.heading != null ? `${Math.round(marker.heading)}°` : '—'}
+                      </p>
+                    )}
+                    {marker.note && (
+                      <p className="text-[11px] font-medium text-cyan-600 dark:text-cyan-400 mt-1">
+                        📍 {marker.note}
+                      </p>
+                    )}
+                    <p className="text-[10px] text-slate-400 pt-1 border-t border-slate-100 dark:border-slate-800">
+                      {formatDateTime(marker.timestamp)}
+                    </p>
+                  </div>
                 </div>
               </Popup>
             </Marker>
@@ -488,7 +515,12 @@ export default function MapView({
             <button
               key={key}
               type="button"
-              onClick={() => setLayer(key)}
+              onClick={() => {
+                setLayer(key);
+                try {
+                  localStorage.setItem('gps_tracker_preferred_layer', key);
+                } catch {}
+              }}
               className={`rounded-lg px-2.5 py-1.5 text-xs font-medium transition-colors ${
                 layer === key ? 'bg-brand-600 text-white' : 'text-slate-600 dark:text-slate-300'
               }`}
